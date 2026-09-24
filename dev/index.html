@@ -1,0 +1,89 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>jev-web playground</title>
+  <style>
+    :root { color-scheme: dark; }
+    body { margin: 0; font: 14px/1.5 system-ui, sans-serif; background: #0d0f12; color: #e6e8eb; }
+    header { padding: 16px 20px; border-bottom: 1px solid #23272e; }
+    header h1 { margin: 0; font-size: 16px; }
+    header p { margin: 4px 0 0; color: #8b949e; font-size: 12px; }
+    main { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; padding: 16px 20px; max-width: 1200px; }
+    @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+    section { border: 1px solid #23272e; border-radius: 10px; padding: 12px; background: #11141a; }
+    h2 { margin: 0 0 8px; font-size: 13px; color: #9aa4b2; font-weight: 600; text-transform: uppercase; letter-spacing: .04em; }
+    label { display: block; font-size: 12px; color: #9aa4b2; margin: 8px 0 4px; }
+    input, select, textarea, button { font: inherit; }
+    input, select, textarea { width: 100%; box-sizing: border-box; background: #0d0f12; color: #e6e8eb; border: 1px solid #2b3038; border-radius: 6px; padding: 6px 8px; }
+    textarea { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; min-height: 120px; resize: vertical; }
+    .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .row > * { flex: 1; min-width: 120px; }
+    button { background: #2b6cb0; border: 0; color: #fff; padding: 8px 12px; border-radius: 6px; cursor: pointer; }
+    button.secondary { background: #23272e; }
+    button:disabled { opacity: .5; cursor: default; }
+    .log { font-family: ui-monospace, monospace; font-size: 12px; color: #8b949e; max-height: 140px; overflow: auto; white-space: pre-wrap; }
+    .answer { border: 1px solid #23272e; border-radius: 8px; padding: 10px; margin: 8px 0; }
+    .answer h3 { margin: 0 0 6px; font-size: 13px; }
+    .verdict { font-size: 16px; font-weight: 600; }
+    .badge { display: inline-block; font-size: 11px; padding: 2px 6px; border-radius: 999px; background: #23272e; color: #9aa4b2; margin-left: 6px; }
+    .bar { display: grid; grid-template-columns: 160px 1fr 56px; gap: 8px; align-items: center; font-size: 12px; margin: 2px 0; }
+    .bar .track { height: 8px; background: #1b1f26; border-radius: 999px; overflow: hidden; }
+    .bar .fill { height: 100%; background: #2b6cb0; }
+    .bar.win .fill { background: #38a169; }
+    .bar .pct { text-align: right; color: #9aa4b2; }
+    .meta { font-size: 12px; color: #8b949e; }
+    .err { color: #fc8181; white-space: pre-wrap; }
+    .warn { color: #f6ad55; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>jev-web playground</h1>
+    <p>Typed decisions in the browser: one state + typed questions → calibrated probabilities, one forward pass, no server.</p>
+  </header>
+  <main>
+    <section>
+      <h2>Model</h2>
+      <label>Repo (open-jev-shaped ONNX export)</label>
+      <input id="model" />
+      <label>Revision (pin for reproducibility; empty = main)</label>
+      <input id="revision" />
+      <div class="row">
+        <div><label>Device</label><select id="device"><option value="auto">auto</option><option>webgpu</option><option>wasm</option></select></div>
+        <div><label>dtype</label><select id="dtype"><option value="auto">auto</option><option>q4f16</option><option>q4</option><option>fp16</option><option>fp32</option></select></div>
+      </div>
+      <div class="row" style="margin-top:10px">
+        <button id="load">Load model</button>
+        <button id="reset" class="secondary">Reset model cache</button>
+      </div>
+      <div id="progress" class="log" style="margin-top:8px"></div>
+      <div id="info" class="meta" style="margin-top:8px"></div>
+    </section>
+
+    <section>
+      <h2>Input</h2>
+      <div class="row">
+        <button id="preset-banking" class="secondary">Banking preset</button>
+        <button id="preset-review" class="secondary">Review preset</button>
+        <button id="preset-empty" class="secondary">Clear</button>
+      </div>
+      <label>State</label>
+      <textarea id="state"></textarea>
+      <label>Questions (JSON: choice / score / noul)</label>
+      <textarea id="questions" style="min-height:180px"></textarea>
+      <div class="row" style="margin-top:10px">
+        <button id="run" disabled>Run decision</button>
+      </div>
+      <div id="error" class="err"></div>
+    </section>
+
+    <section style="grid-column: 1 / -1">
+      <h2>Answers</h2>
+      <div id="answers" class="meta">Load a model, then run.</div>
+    </section>
+  </main>
+  <script type="module" src="./main.mjs"></script>
+</body>
+</html>
