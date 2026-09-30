@@ -305,6 +305,10 @@ import { createDecider } from "jev-web";
   COOP/COEP headers that unlock `SharedArrayBuffer` for the threaded
   onnxruntime-web build (GitHub Pages cannot set those headers, so the deployed
   demo runs single-threaded).
+- **Verify a change visually** — `node tools/shot.mjs jobs.json` drives headless
+  Chrome over CDP, waits on a real DOM condition, and reports the page's own
+  console errors. The GIF in this README was built with it. It exists because a
+  screenshot alone cannot tell you a promise is silently rejecting.
 
 ## Limits
 

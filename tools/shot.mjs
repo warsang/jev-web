@@ -1,24 +1,50 @@
-// Screenshot the live demos over the Chrome DevTools Protocol.
+// Screenshot the demo (local or deployed) over the Chrome DevTools Protocol.
 //
 // Why not `chrome --screenshot`: it fires at the load event, which is before
-// this demo's async boot (hardware detect -> manifest fetch -> render) has
-// painted the panel, and --virtual-time-budget starves the network so the page
-// comes out blank. Driving CDP directly lets us wait for a real condition and
-// capture when the pixels are actually there.
+// this demo's async boot (weight download -> first forward pass) has painted
+// anything, and --virtual-time-budget starves the network so the page comes out
+// blank. Driving CDP directly lets us wait on a real DOM condition and capture
+// when the pixels are actually there. It also lets us collect the page's own
+// console errors, which is how the "history shadows window.history" bug in
+// demo/main.mjs was found — it was a silent unhandled rejection that a
+// screenshot alone would have looked fine.
 //
 // Zero dependencies: Node 22+ has a global WebSocket and fetch.
 //
-//   node tools/shot.mjs <jobs.json>
+//   CHROME_PATH=/path/to/chrome node tools/shot.mjs jobs.json
 //
-// jobs.json: [{ "url": "...", "out": "...", "waitFor": "css", "waitMs": 1500 }]
+// jobs.json: [{
+//   "url": "https://warsang.github.io/jev-web/",
+//   "out": "out.png",
+//   "waitFor": "document.querySelectorAll('#naive .ans').length > 0",
+//   "steps": [{ "script": "document.getElementById('load').click()",
+//               "waitFor": "document.getElementById('model-state').textContent === 'model ready'" }],
+//   "report": "({ latency: document.getElementById('m-latency').textContent })"
+// }]
 
 import { spawn } from "node:child_process";
-import { mkdir, writeFile, rm } from "node:fs/promises";
+import { mkdir, writeFile, rm, readFile } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
 import net from "node:net";
 
-const CHROME = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
+const CHROME_CANDIDATES = [
+  process.env.CHROME_PATH,
+  "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe",
+  "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe",
+  "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe",
+  "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+  "/usr/bin/google-chrome",
+  "/usr/bin/chromium",
+].filter(Boolean);
+
+async function findChrome() {
+  const { access } = await import("node:fs/promises");
+  for (const c of CHROME_CANDIDATES) {
+    try { await access(c); return c; } catch { /* next */ }
+  }
+  throw new Error(`no Chrome found. Set CHROME_PATH.\nTried:\n  ${CHROME_CANDIDATES.join("\n  ")}`);
+}
 
 // Ephemeral port: a leaked headless process would otherwise make every later
 // run fail with EADDRINUSE, and there is no fixed port worth fighting for.
@@ -109,7 +135,7 @@ async function shoot(jobs, extraArgs = []) {
   const profile = path.join(os.tmpdir(), "opencode", `cdp-profile-${process.pid}-${Date.now()}`);
   await rm(profile, { recursive: true, force: true });
   PORT = await freePort();
-  const chrome = spawn(CHROME, [
+  const chrome = spawn(await findChrome(), [
     "--headless=new",
     `--remote-debugging-port=${PORT}`,
     `--user-data-dir=${profile}`,
@@ -205,6 +231,6 @@ async function shoot(jobs, extraArgs = []) {
   return out;
 }
 
-const jobs = JSON.parse(process.argv[2] ? await (await import("node:fs/promises")).readFile(process.argv[2], "utf8") : "[]");
+const jobs = JSON.parse(process.argv[2] ? await readFile(process.argv[2], "utf8") : "[]");
 const res = await shoot(jobs, process.argv[3] ? process.argv[3].split(" ").filter(Boolean) : []);
 for (const r of res) console.log(JSON.stringify(r));
