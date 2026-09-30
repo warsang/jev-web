@@ -46,6 +46,21 @@ let questions = structuredClone(PRESETS[0].questions);
 let debounce = 0;
 const history = [];
 
+// URL state: ?preset=negation links straight to a scenario so a disagreement
+// between the model and the rules can be pointed at directly.
+function readUrlState() {
+  const q = new URLSearchParams(location.search);
+  const p = q.get("preset");
+  if (p && PRESETS.some((x) => x.id === p)) return p;
+  return PRESETS[0].id;
+}
+
+function syncUrl() {
+  const active = [...$("presets").children].find((b) => b.getAttribute("aria-pressed") === "true");
+  const id = active?.dataset.id ?? PRESETS[0].id;
+  history.replaceState(null, "", id === PRESETS[0].id ? location.pathname + location.hash : `?preset=${id}${location.hash}`);
+}
+
 // ── network monitor (real requests, via the Performance API) ───────────
 const net = { cold: 0, warm: 0, hosts: new Map(), watching: false };
 try {
@@ -154,6 +169,7 @@ function loadPreset(id) {
   questions = structuredClone(p.questions);
   for (const b of $("presets").children) b.setAttribute("aria-pressed", String(b.dataset.id === p.id));
   renderQuestions();
+  syncUrl();
   schedule();
 }
 
@@ -390,7 +406,7 @@ $("dtype").onchange = $("device").onchange;
 // ── boot ───────────────────────────────────────────────────────────────
 (async () => {
   renderQuestions();
-  loadPreset("easy");
+  loadPreset(readUrlState());
 
   // Report the resolved backend before anyone spends 300 MB finding out.
   const { detectWebGPU, resolveDevice, resolveDtype } = await import("../src/index.mjs");
