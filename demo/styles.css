@@ -33,7 +33,6 @@ html[data-theme="light"] {
 }
 
 * { box-sizing: border-box; }
-html { scroll-behavior: smooth; }
 body {
   margin: 0;
   background: var(--bg);
@@ -250,5 +249,4 @@ select { padding: 9px 10px; font-size: 12px; }
 
 @media (prefers-reduced-motion: reduce) {
   * { animation: none !important; transition: none !important; }
-  html { scroll-behavior: auto; }
 }
