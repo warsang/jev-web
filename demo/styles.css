@@ -214,7 +214,9 @@ select { padding: 9px 10px; font-size: 12px; }
 .bar { display: grid; grid-template-columns: minmax(70px, 140px) 1fr 48px; gap: 8px; align-items: center; }
 .bar .n { font: 11.5px var(--mono); color: var(--fg-dim); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bar .t { height: 7px; border-radius: 999px; background: var(--line-soft); overflow: hidden; }
-.bar .f { height: 100%; background: color-mix(in srgb, var(--accent) 55%, transparent); border-radius: 999px; transition: width .18s ease-out; }
+/* display:block is load-bearing: the fill is an <i>, and width/height do
+   nothing to an inline box. Without it every bar renders empty. */
+.bar .f { display: block; height: 100%; background: color-mix(in srgb, var(--accent) 55%, transparent); border-radius: 999px; transition: width .18s ease-out; }
 .bar.win .n { color: var(--fg); }
 .bar.win .f { background: var(--accent); }
 .bar .p { font: 11.5px var(--mono); color: var(--fg-faint); text-align: right; font-variant-numeric: tabular-nums; }

@@ -143,8 +143,18 @@ async function shoot(jobs, extraArgs = []) {
       if (job.waitFor && !ok) out.push({ out: job.out, warn: "waitFor never became true" });
 
       if (job.script) await s.evaluate(job.script);
-      // Second phase: after driving the page (e.g. clicking "Load model" and
-      // waiting out a 348 MB weight download), wait for *that* to settle.
+      // Steps run after the initial wait: each may drive the page and then wait
+      // for its own condition. Needed for the model demo, where the sequence is
+      // click "Load model" -> weights download -> first (slow) forward pass.
+      for (const [i, step] of (job.steps ?? []).entries()) {
+        if (step.script) await s.evaluate(step.script);
+        if (step.waitFor) {
+          const ok = await waitFor(s, step.waitFor, step.timeoutMs ?? 900_000);
+          if (!ok) out.push({ out: job.out, warn: `step ${i} waitFor never became true: ${step.waitFor}` });
+        } else if (step.waitMs) {
+          await sleep(step.waitMs);
+        }
+      }
       if (job.thenWaitFor) {
         const ok2 = await waitFor(s, job.thenWaitFor, job.thenTimeoutMs ?? 900_000);
         if (!ok2) out.push({ out: job.out, warn: "thenWaitFor never became true" });
