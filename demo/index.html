@@ -40,9 +40,9 @@
 
       <pre class="quickstart" id="quickstart"><code>import { createDecider } from "jev-web";
 const decider = await createDecider();
-const { answers } = await decider.decide("I was charged twice for the order.",
-  [{ type: "noul", instructions: "Is a refund being requested?" }]);
-console.log(answers[0].noul, answers[0].probabilities); <span class="hint">// 0.93 { no: 0.07, yes: 0.93 }</span></code></pre>
+const { answers } = await decider.decide("I was charged twice for the same order.",
+  [{ type: "noul", instructions: "The customer is asking for a refund." }]);
+console.log(answers[0].noul, answers[0].probabilities); <span class="hint">// 0.92 { no: 0.08, yes: 0.92 }</span></code></pre>
     </div>
   </header>
 
@@ -206,7 +206,7 @@ console.log(answers[0].noul, answers[0].probabilities); <span class="hint">// 0.
             </tr>
             <tr>
               <th>Latency</th>
-              <td class="win"><b id="mx-latency">~tens of ms</b> warm, measured above</td>
+              <td class="win"><b id="mx-latency">measured above</b> — all questions in one pass</td>
               <td id="mx-api-latency">typically 0.4–3 s, plus a network round trip</td>
             </tr>
             <tr>

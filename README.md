@@ -1,13 +1,140 @@
 # jev-web
 
+[![npm](https://img.shields.io/npm/v/jev-web.svg)](https://www.npmjs.com/package/jev-web)
+[![license](https://img.shields.io/npm/l/jev-web.svg)](./LICENSE)
+[![CI](https://github.com/warsang/jev-web/actions/workflows/test.yml/badge.svg)](https://github.com/warsang/jev-web/actions/workflows/test.yml)
+
 Run **open-jev-shaped typed-decision models** in the browser. One *state* text
 plus any number of typed *questions* (`choice` / `score` / `noul`) go in; a
-calibrated probability distribution per question comes back from a single
-forward pass. No server, no API keys — weights and inference stay on-device.
+calibrated probability distribution per question comes back from a **single
+forward pass**. No server, no API keys, no network calls after the weights are
+cached.
 
-This is a generic runtime, not a classifier for any particular domain. You
-bring the state text and the questions; the model answers by choosing among
-the options you give it.
+This is a generic runtime, not a classifier for any particular domain. You bring
+the state text and the questions; the model answers by choosing among the options
+you give it.
+
+## ▶ Live demo
+
+**https://warsang.github.io/jev-web/**
+
+An interactive playground that runs this exact package: type a state, add typed
+questions, and watch the model and a hand-written keyword baseline answer
+side by side. It also counts your actual outbound requests, so the
+"offline / private / no server" claim is checkable rather than asserted.
+
+![jev-web demo: typed decisions vs raw text parsing](docs/demo.gif)
+
+<sub>The frames are captured from the live demo at
+[warsang.github.io/jev-web](https://warsang.github.io/jev-web/) — site → typed
+decisions with latency → the negation case where the rules and the model
+disagree → the comparison matrix.</sub>
+
+Three questions, one forward pass, and a hard label from the rule parser that
+could not answer the third question at all:
+
+![three typed decisions with full distributions and a measured latency, beside a keyword baseline that returns hard labels and no answer](docs/demo-typed.png)
+
+## Quickstart
+
+```js
+import { createDecider } from "jev-web";
+
+const decider = await createDecider();          // ~340 MB of weights, once
+const { answers } = await decider.decide(
+  "I was charged twice for the same order.",
+  [{ type: "noul", instructions: "The customer is asking for a refund." }],
+);
+
+answers[0].noul;                    // 0.92   — p(yes)
+answers[0].probabilities;           // { no: 0.08, yes: 0.92 }
+answers[0].confidence;               // 0.92
+```
+
+That is the whole integration. The first call downloads the weights and the
+browser caches them; every later call — and every later visit, including
+offline — is local. **Zero dependencies**: `@huggingface/transformers` is an
+optional peer, imported lazily.
+
+## What comes back
+
+```js
+const { answers } = await decider.decide(
+  "I was charged twice for the same order and nobody answers my emails. I want my money back now.",
+  [
+    { type: "choice", instructions: "Which product area is the message about?",
+      options: ["fees & charges", "refund & dispute", "card", "other"] },
+    { type: "noul",   instructions: "The customer is asking for a refund." },
+    { type: "score",  instructions: "How negative is the message?",
+      options: ["very negative", "negative", "neutral", "positive", "very positive"] },
+  ],
+);
+
+// [
+//   { type: "choice", choice: "fees & charges", index: 0,
+//     probabilities: { "fees & charges": 0.796, "refund & dispute": 0.169,
+//                      card: 0.019, other: 0.016 }, confidence: 0.796 },
+//   { type: "noul", noul: 0.927,
+//     probabilities: { no: 0.073, yes: 0.927 }, confidence: 0.927 },
+//   { type: "score", score: 0.866, level: 1,
+//     probabilities: { "very negative": 0.336, negative: 0.478, neutral: 0.175,
+//                      positive: 0.008, "very positive": 0.003 }, confidence: 0.478 },
+// ]
+// timings: { totalMs, inferMs }   ·  length, truncated, prompts
+```
+
+Three questions, **one** forward pass, and every question carries the full
+distribution — not just a label. That last part is the point: a hard label
+cannot be thresholded, routed by confidence, or second-guessed, and the
+`choice` answer above is a genuine 79.6 / 16.9 split rather than a coin flip you
+find out about later.
+
+## jev-web vs. calling a hosted LLM API with `fetch()`
+
+| | jev-web | Hosted LLM API via `fetch()` |
+|---|---|---|
+| **Cost per decision** | **$0.00** — the weights are static files | per-token, forever; a busy form multiplies it by every visitor |
+| **Latency** | one local forward pass, measured live on the demo page | typically 0.4–3 s, plus a network round trip |
+| **Network at answer time** | **0 requests** — works in airplane mode | one round trip per call, minimum |
+| **Output shape** | **calibrated distribution per question, every question in one pass** | prose you then have to regex back into a distribution |
+| **Determinism** | same input → same probabilities, always | temperature 0 + structured outputs helps; still not guaranteed |
+| **Privacy** | your text never leaves the device | your users' text is sent to a third party on every call |
+| **Ops burden** | static files on a CDN, no key, no rate limit | key management, quotas, rate limits, uptime, spend alerts |
+| **Ceiling** | only *picks among options you supply* — never writes, never explains | general purpose; will happily invent an option you never offered |
+
+**The honest trade.** jev-web is a classifier, not a chatbot. If you need
+free-form answers you need a generator. If you need a routing decision, a score,
+or a yes/no with a confidence you can threshold on, this is the cheaper, faster
+and private one — and it is also *smaller*: a 0.5 B model plus your options
+beats a frontier model plus a parsing layer, on every axis except generality.
+
+## Try it before you install it
+
+The live demo covers the interesting cases, and the presets are chosen to break
+keyword parsing rather than to flatter the model:
+
+| preset | what it shows |
+|---|---|
+| **Banking triage** | easy text — a fair rule can match, the model adds a confidence |
+| **Negation trap** | *"This is not about a refund. My card was stolen…"* — the keyword rule routes to `refund & dispute`; the model routes to `card` (53.3%) and answers the refund question **no** (0.101) |
+| **Contradictory review** | praise and complaint in one sentence; keyword polarity reads the praise |
+| **Mixed intent** | two intents in one state — a hard label must pick one, a distribution does not have to |
+| **Out of domain** | no in-domain signal at all; the rule parser has nothing to say |
+
+The negation case is the one worth looking at. The state is *"This is not about
+a refund. My card was stolen in Madrid and the bank refuses to help. I never
+received the money back I asked about."*
+
+![negation: the keyword baseline routes to refund and dispute, the model routes to card](docs/demo-negation.png)
+
+The rule parser finds the word `refund` and routes to **refund & dispute** — the
+exact opposite of what the customer meant. The model routes to **card** (53.3%)
+and answers *"the customer is asking for a refund"* with **no** (0.101). Both
+the bad routing and the inversion come from the same clause, and neither is
+visible in a hard label.
+
+The demo also tracks outbound requests through the Performance API: you will see
+~14 requests while the weights load, then **0** for every decision after that.
 
 ## Install
 
@@ -22,7 +149,7 @@ lazily). Hosts that already ship their own copy can inject it via
 ## Use
 
 ```js
-import { createDecider } from "jev-web";
+import { createDecider, DEFAULT_MODEL, DEFAULT_REVISION } from "jev-web";
 
 const decider = await createDecider({
   // defaults to the reference open-jev DeBERTa-v3-large ONNX export,
@@ -46,12 +173,6 @@ const { answers } = await decider.decide(
     },
   ],
 );
-
-// [
-//   { type: "choice", choice: "refund & dispute", index: 1, probabilities: {...}, confidence: 0.61 },
-//   { type: "noul",  noul: 0.93, probabilities: { no: 0.07, yes: 0.93 }, confidence: 0.93 },
-//   { type: "score", score: 0.4,  level: 1, probabilities: {...}, confidence: 0.55 },
-// ]
 ```
 
 ## Question types
@@ -89,7 +210,6 @@ createDecider({ model: "your-org/your-typed-decision-ONNX", revision: "main" });
 The export must add the `[STATE]`, `[Q]`, `[OPT]` markers to its tokenizer,
 take `input_ids, attention_mask, seg, pair_q, pair_opt`, and return per-pair
 `logits`. `typedMarkerIds()` fails loudly when a repo is missing them.
-
 
 ## Multiple families (registry)
 
@@ -178,14 +298,13 @@ import { createDecider } from "jev-web";
   `softmaxWithTemperature`, `resolveDevice`, `resolveDtype`, `detectWebGPU`,
   `loadModelConfig`, defaults (model/revision/temperature/caps).
 
-## Playground
+## Demos
 
-```bash
-npm run dev   # packages/jev-web → http://localhost:5188
-```
-
-Generic presets plus a paste-your-own state/questions box, download progress,
-latency, and a model-cache reset.
+- **Live demo** — <https://warsang.github.io/jev-web/> (built from `demo/`, deployed on every push)
+- **Local playground** — `npm run dev` → <http://localhost:5188>. Same ideas, plus
+  COOP/COEP headers that unlock `SharedArrayBuffer` for the threaded
+  onnxruntime-web build (GitHub Pages cannot set those headers, so the deployed
+  demo runs single-threaded).
 
 ## Limits
 
