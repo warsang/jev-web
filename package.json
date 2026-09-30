@@ -31,6 +31,8 @@
   "scripts": {
     "dev": "vite",
     "build:dev": "vite build",
+    "demo": "vite --config vite.demo.config.js",
+    "build:demo": "vite build --config vite.demo.config.js",
     "test": "node --test test/*.test.mjs"
   },
   "peerDependencies": {

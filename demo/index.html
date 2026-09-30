@@ -1,0 +1,275 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>jev-web — typed decisions in the browser</title>
+  <meta name="description" content="One state text plus typed questions in, calibrated probability distributions out. Single forward pass, on-device, zero network calls after the weights are cached." />
+  <link rel="stylesheet" href="./styles.css" />
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230b0f14'/%3E%3Cpath d='M8 21l5-9 3 5 2-3 6 7z' fill='%2334d399'/%3E%3C/svg%3E" />
+</head>
+<body>
+  <a class="skip" href="#demo">Skip to demo</a>
+
+  <header class="hero">
+    <div class="wrap">
+      <div class="hero-top">
+        <h1><span class="logo">jev&#8203;-web</span></h1>
+        <div class="badges">
+          <span class="badge" title="No runtime dependencies — @huggingface/transformers is an optional peer">0 deps</span>
+          <span class="badge ok" title="No server, no API key">no server</span>
+          <span class="badge ok" title="Works after the one-time weight download">offline</span>
+          <span class="badge ok" title="Nothing leaves the device">private</span>
+        </div>
+        <button id="theme" class="ghost" type="button" aria-label="Toggle colour theme">◐</button>
+      </div>
+
+      <p class="tagline">
+        Run <strong>typed-decision models</strong> in the browser. One <em>state</em> text plus any number of
+        typed <em>questions</em> (<code>choice</code> / <code>score</code> / <code>noul</code>) go in;
+        a <strong>calibrated probability distribution</strong> per question comes back from a
+        <strong>single forward pass</strong>.
+      </p>
+
+      <div class="cta">
+        <a class="btn primary" href="#demo">▶ Try it live below</a>
+        <button class="btn" id="copy-quickstart" type="button">Copy 5-line quickstart</button>
+        <a class="btn" href="https://www.npmjs.com/package/jev-web" target="_blank" rel="noopener">npm</a>
+        <a class="btn" href="https://github.com/warsang/jev-web" target="_blank" rel="noopener">GitHub</a>
+      </div>
+
+      <pre class="quickstart" id="quickstart"><code>import { createDecider } from "jev-web";
+const decider = await createDecider();
+const { answers } = await decider.decide("I was charged twice for the order.",
+  [{ type: "noul", instructions: "Is a refund being requested?" }]);
+console.log(answers[0].noul, answers[0].probabilities); <span class="hint">// 0.93 { no: 0.07, yes: 0.93 }</span></code></pre>
+    </div>
+  </header>
+
+  <section class="stats" aria-label="Live metrics">
+    <div class="wrap stat-row">
+      <div class="stat">
+        <div class="stat-value" id="m-latency">—</div>
+        <div class="stat-label">latency, warm</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value" id="m-passes">—</div>
+        <div class="stat-label">forward passes</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value" id="m-questions">—</div>
+        <div class="stat-label">questions answered</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value" id="m-cost">$0</div>
+        <div class="stat-label">cost per call</div>
+      </div>
+      <div class="stat">
+        <div class="stat-value" id="m-net">—</div>
+        <div class="stat-label">network calls when warm</div>
+      </div>
+      <div class="stat spark">
+        <svg id="spark" viewBox="0 0 200 44" preserveAspectRatio="none" aria-hidden="true"></svg>
+        <div class="stat-label">last 40 runs</div>
+      </div>
+    </div>
+  </section>
+
+  <main class="wrap" id="demo">
+    <div class="columns">
+      <!-- ───────────────────────── input ───────────────────────── -->
+      <section class="card input">
+        <div class="card-head">
+          <h2>Input</h2>
+          <span class="pill" id="model-state">model not loaded</span>
+        </div>
+
+        <div class="presets" id="presets" role="group" aria-label="Example inputs"></div>
+
+        <label class="field">
+          <span class="label">State <em>— the text to reason about</em></span>
+          <textarea id="state" rows="4" spellcheck="false" placeholder="Paste a message, review, ticket, note…"></textarea>
+        </label>
+
+        <div class="qhead">
+          <span class="label">Questions <em>— all answered in one pass</em></span>
+          <div class="qhead-actions">
+            <button class="mini" data-add="choice" type="button">+ choice</button>
+            <button class="mini" data-add="score" type="button">+ score</button>
+            <button class="mini" data-add="noul" type="button">+ noul</button>
+          </div>
+        </div>
+        <div id="questions" class="questions"></div>
+
+        <div class="actions">
+          <button class="btn primary" id="run" type="button" disabled>Decide</button>
+          <button class="btn" id="load" type="button">Load model</button>
+          <label class="select-wrap">
+            <span class="sr-only">device</span>
+            <select id="device">
+              <option value="auto">device: auto</option>
+              <option value="webgpu">device: webgpu</option>
+              <option value="wasm">device: wasm (cpu)</option>
+            </select>
+          </label>
+          <label class="select-wrap">
+            <span class="sr-only">dtype</span>
+            <select id="dtype">
+              <option value="auto">dtype: auto</option>
+              <option value="q4f16">q4f16</option>
+              <option value="q4">q4</option>
+              <option value="fp16">fp16</option>
+              <option value="fp32">fp32</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="progress" id="progress" hidden>
+          <div class="progress-bar"><i id="progress-fill"></i></div>
+          <div class="progress-meta" id="progress-meta">starting…</div>
+        </div>
+        <p class="note" id="info"></p>
+        <p class="error" id="error" hidden></p>
+      </section>
+
+      <!-- ───────────────────────── results ───────────────────────── -->
+      <section class="results">
+        <div class="card">
+          <div class="card-head">
+            <h2>Typed decisions <span class="sub">jev-web · one forward pass</span></h2>
+            <span class="pill good" id="typed-when">—</span>
+          </div>
+          <div id="answers" class="answers">
+            <p class="empty">Load the model, then press <b>Decide</b>. Editing the state re-runs automatically.</p>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <h2>Raw text parsing <span class="sub">regex / keyword rules</span></h2>
+            <span class="pill warn" id="naive-when">—</span>
+          </div>
+          <div id="naive" class="answers">
+            <p class="empty">The other way to do this: a hand-written rule per question.</p>
+          </div>
+          <p class="note">
+            The baseline is a fair keyword matcher — it wins on easy text and collapses on negation,
+            contrast and mixed-topic states. It is also <b>N separate rule sets</b> to maintain, and it
+            can only ever return a hard label: <b>no distribution, no confidence, no way to threshold it.</b>
+          </p>
+        </div>
+      </section>
+    </div>
+
+    <!-- ───────────────────────── network proof ───────────────────────── -->
+    <section class="card">
+      <div class="card-head">
+        <h2>Network panel <span class="sub">proof, not a promise</span></h2>
+        <span class="pill" id="conn">online</span>
+      </div>
+      <div class="net-grid">
+        <div>
+          <div class="net-k">Requests to load the weights</div>
+          <div class="net-v" id="net-cold">—</div>
+          <div class="net-sub">one-time, cached by the browser afterwards</div>
+        </div>
+        <div>
+          <div class="net-k">Requests while answering (warm)</div>
+          <div class="net-v" id="net-warm">—</div>
+          <div class="net-sub" id="net-warm-sub">press Decide to measure</div>
+        </div>
+        <div>
+          <div class="net-k">Content leaving this tab</div>
+          <div class="net-v" id="net-leak">nothing</div>
+          <div class="net-sub">the state text is never transmitted</div>
+        </div>
+      </div>
+      <details class="hosts">
+        <summary>outbound hosts observed by the Performance API</summary>
+        <div id="host-list" class="host-list"><em>none yet</em></div>
+      </details>
+    </section>
+
+    <!-- ───────────────────────── matrix ───────────────────────── -->
+    <section class="card">
+      <div class="card-head"><h2>jev-web vs. calling a hosted LLM API with <code>fetch()</code></h2></div>
+      <div class="table-scroll">
+        <table class="matrix">
+          <thead>
+            <tr><th></th><th class="win-col">jev-web (this demo)</th><th>hosted LLM API via <code>fetch()</code></th></tr>
+          </thead>
+          <tbody>
+            <tr>
+              <th>Cost per decision</th>
+              <td class="win"><b>$0.00</b> — weights are static files</td>
+              <td>per-token, forever; a busy form multiplies it by every visitor</td>
+            </tr>
+            <tr>
+              <th>Latency</th>
+              <td class="win"><b id="mx-latency">~tens of ms</b> warm, measured above</td>
+              <td id="mx-api-latency">typically 0.4–3 s, plus a network round trip</td>
+            </tr>
+            <tr>
+              <th>Output</th>
+              <td class="win">calibrated distribution per question, <b>every question in one pass</b></td>
+              <td>prose you then have to regex back into a distribution</td>
+            </tr>
+            <tr>
+              <th>Determinism</th>
+              <td class="win">same input → same probabilities, always</td>
+              <td>temperature 0 + structured outputs helps, still not guaranteed</td>
+            </tr>
+            <tr>
+              <th>Offline</th>
+              <td class="win">works in airplane mode once cached</td>
+              <td>dead</td>
+            </tr>
+            <tr>
+              <th>Privacy</th>
+              <td class="win">state text never leaves the device</td>
+              <td>your users' text is sent to a third party on every call</td>
+            </tr>
+            <tr>
+              <th>Ops burden</th>
+              <td class="win">static files on a CDN, no API key, no rate limit</td>
+              <td>key management, rate limits, quotas, uptime, spend alerts</td>
+            </tr>
+            <tr>
+              <th>Ceiling</th>
+              <td>only <em>picks among options you supply</em> — never writes, never explains</td>
+              <td>general purpose; will happily hallucinate an option you never offered</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+      <p class="note">
+        The honest trade: jev-web is a <b>classifier</b>, not a chatbot. If you need free-form answers,
+        you need a generator. If you need a routing decision, a score, or a yes/no with a confidence
+        you can threshold on — this is the cheaper, faster, private one.
+      </p>
+    </section>
+
+    <section class="card" id="install">
+      <div class="card-head"><h2>Install</h2></div>
+      <pre class="code"><code>npm i jev-web @huggingface/transformers</code></pre>
+      <p class="note">
+        <code>@huggingface/transformers</code> is an optional peer dependency (imported lazily); hosts that
+        already ship their own copy can inject it via <code>createDecider({ transformers })</code>.
+        This page runs on GitHub Pages, which cannot set COOP/COEP, so the ONNX runtime stays
+        single-threaded; run <code>npm run dev</code> locally for the threaded WASM build.
+      </p>
+    </section>
+  </main>
+
+  <footer class="wrap foot">
+    <span>MIT runtime · reference weights Apache-2.0</span>
+    <span>
+      <a href="https://github.com/warsang/jev-web" target="_blank" rel="noopener">github.com/warsang/jev-web</a>
+      ·
+      <a href="https://www.npmjs.com/package/jev-web" target="_blank" rel="noopener">npm i jev-web</a>
+    </span>
+  </footer>
+
+  <script type="module" src="./main.mjs"></script>
+</body>
+</html>
