@@ -39,7 +39,11 @@ const LEXICON = {
   positive: ["great", "love", "excellent", "amazing", "fantastic", "brilliant", "perfect", "best", "wonderful", "recommend", "five stars", "10/10", "smooth", "fast"],
   negative: ["terrible", "awful", "hate", "broken", "buggy", "unusable", "worst", "refund", "complaint", "crash", "crashes", "crashing", "unresponsive", "disappointed", "furious", "ridiculous", "waste"],
   neutral: ["okay", "fine", "average", "alright", "mixed", "neither", "so-so"],
-  negativeScore: { very: ["furious", "outrageous", "disaster", "worst", "unacceptable", "appalling"], mild: ["disappointed", "annoying", "slow", "buggy", "frustrating", "mediocre"] },
+  // Keys are `very` / `mild` (intensifier buckets), not `strong`.
+  negativeScore: {
+    very: ["furious", "outrageous", "disaster", "worst", "unacceptable", "appalling"],
+    mild: ["disappointed", "annoying", "slow", "buggy", "frustrating", "mediocre"],
+  },
 };
 
 const NEGATORS = new Set(["not", "no", "never", "without", "isnt", "wasnt", "dont", "didnt", "doesnt", "cant", "cannot", "wont", "nobody"]);
@@ -142,12 +146,12 @@ export function parseOne(state, question) {
     return { type: "score", value: null, rule: "no sentiment keywords", confidence: null, hits: [], negated: false, ruled: false };
   }
   const n = question.options.length;
-  const strong = countHits(text, LEXICON.negativeScore.strong).length;
+  const intense = countHits(text, LEXICON.negativeScore.very).length;
   const idx = Math.min(n - 1, Math.max(0, Math.round(s * (n - 1))));
   return {
     type: "score",
     value: idx,
-    rule: `${LEXICON.negative.length && strong ? "strong+soft negative" : "keyword polarity"} (${countHits(text, LEXICON.negative).length} neg / ${countHits(text, LEXICON.positive).length} pos)`,
+    rule: `${intense ? "intense+soft negative" : "keyword polarity"} (${countHits(text, LEXICON.negative).length} neg / ${countHits(text, LEXICON.positive).length} pos)`,
     confidence: null,
     hits: [...countHits(text, LEXICON.positive), ...countHits(text, LEXICON.negative)],
     negated: false,

@@ -16,12 +16,25 @@ import { spawn } from "node:child_process";
 import { mkdir, writeFile, rm } from "node:fs/promises";
 import path from "node:path";
 import os from "node:os";
+import net from "node:net";
 
 const CHROME = "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe";
-const PORT = 9333;
+
+// Ephemeral port: a leaked headless process would otherwise make every later
+// run fail with EADDRINUSE, and there is no fixed port worth fighting for.
+const freePort = () =>
+  new Promise((resolve, reject) => {
+    const s = net.createServer();
+    s.on("error", reject);
+    s.listen(0, "127.0.0.1", () => {
+      const { port } = s.address();
+      s.close(() => resolve(port));
+    });
+  });
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
+let PORT = 0;
 async function cdpTargets() {
   const res = await fetch(`http://127.0.0.1:${PORT}/json/list`);
   return res.json();
@@ -58,7 +71,7 @@ class Session {
       }
     });
   }
-  send(method, params = {}) {
+  send(method, params = {}, timeoutMs = 60_000) {
     const id = ++this.id;
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject });
@@ -68,7 +81,7 @@ class Session {
           this.pending.delete(id);
           reject(new Error(`CDP timeout: ${method}`));
         }
-      }, 60_000);
+      }, timeoutMs);
     });
   }
   async evaluate(expression) {
@@ -91,8 +104,11 @@ async function waitFor(s, expression, timeoutMs = 30_000) {
 }
 
 async function shoot(jobs, extraArgs = []) {
-  const profile = path.join(os.tmpdir(), "opencode", "cdp-profile");
+  // Unique per run: a leftover headless process holding the previous profile
+  // makes the next launch fail on an unlinkable CrashpadMetrics file.
+  const profile = path.join(os.tmpdir(), "opencode", `cdp-profile-${process.pid}-${Date.now()}`);
   await rm(profile, { recursive: true, force: true });
+  PORT = await freePort();
   const chrome = spawn(CHROME, [
     "--headless=new",
     `--remote-debugging-port=${PORT}`,
@@ -161,13 +177,15 @@ async function shoot(jobs, extraArgs = []) {
       }
       if (job.after) await sleep(job.after);
 
+      // A busy main thread (ONNX/WebGPU inference) can stall the compositor,
+      // so give the capture a much longer leash than a normal command.
       const shot = await s.send("Page.captureScreenshot", {
         format: "png",
         captureBeyondViewport: !!job.fullPage,
         ...(job.fullPage
           ? { clip: await s.evaluate(`(()=>{const r=document.documentElement.getBoundingClientRect();return {x:0,y:0,width:Math.ceil(r.width),height:Math.ceil(r.height),scale:1};})()`) }
           : {}),
-      });
+      }, 180_000);
       await mkdir(path.dirname(job.out), { recursive: true });
       await writeFile(job.out, Buffer.from(shot.data, "base64"));
 
@@ -181,6 +199,8 @@ async function shoot(jobs, extraArgs = []) {
   } finally {
     try { await fetch(`http://127.0.0.1:${PORT}/json/close/x`).catch(() => {}); } catch { /* ignore */ }
     chrome.kill();
+    await sleep(1500);
+    await rm(profile, { recursive: true, force: true }).catch(() => {});
   }
   return out;
 }

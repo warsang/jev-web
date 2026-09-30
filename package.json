@@ -8,7 +8,7 @@
     "type": "git",
     "url": "git+https://github.com/warsang/jev-web.git"
   },
-  "homepage": "https://github.com/warsang/jev-web#readme",
+  "homepage": "https://warsang.github.io/jev-web/",
   "bugs": {
     "url": "https://github.com/warsang/jev-web/issues"
   },
@@ -17,6 +17,7 @@
   },
   "files": [
     "src/",
+    "docs/",
     "README.md"
   ],
   "keywords": [
