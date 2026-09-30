@@ -5,7 +5,14 @@
 // from performance.now() around the real call, and the network panel counts real
 // requests through the Performance API.
 
-import { createDecider, DEFAULT_MODEL, DEFAULT_REVISION } from "../src/index.mjs";
+import {
+  createDecider,
+  detectWebGPU,
+  resolveDevice,
+  resolveDtype,
+  DEFAULT_MODEL,
+  DEFAULT_REVISION,
+} from "../src/index.mjs";
 import { parseAll } from "./naive.mjs";
 import { PRESETS } from "./presets.mjs";
 
@@ -44,7 +51,10 @@ let loading = false;
 let running = false;
 let questions = structuredClone(PRESETS[0].questions);
 let debounce = 0;
-const history = [];
+// NOT `history`: that name shadows window.history, and syncUrl() below calls
+// history.replaceState(). The sparkline array and the History API are both
+// "history" and only one of them is a Web API.
+const runHistory = [];
 
 // URL state: ?preset=negation links straight to a scenario so a disagreement
 // between the model and the rules can be pointed at directly.
@@ -58,7 +68,14 @@ function readUrlState() {
 function syncUrl() {
   const active = [...$("presets").children].find((b) => b.getAttribute("aria-pressed") === "true");
   const id = active?.dataset.id ?? PRESETS[0].id;
-  history.replaceState(null, "", id === PRESETS[0].id ? location.pathname + location.hash : `?preset=${id}${location.hash}`);
+  // globalThis.history explicitly: a bare `history` in this module is exactly
+  // the name that got shadowed before, and a wrong answer here should never be
+  // able to take the inference path down with it.
+  globalThis.history.replaceState(
+    null,
+    "",
+    id === PRESETS[0].id ? location.pathname + location.hash : `?preset=${id}${location.hash}`,
+  );
 }
 
 // ── network monitor (real requests, via the Performance API) ───────────
@@ -169,8 +186,10 @@ function loadPreset(id) {
   questions = structuredClone(p.questions);
   for (const b of $("presets").children) b.setAttribute("aria-pressed", String(b.dataset.id === p.id));
   renderQuestions();
-  syncUrl();
+  // Answer first, write the URL second: the address bar is a nicety and must
+  // never be able to stop the demo from producing results.
   schedule();
+  syncUrl();
 }
 
 const presetHost = $("presets");
@@ -189,14 +208,14 @@ $("state").oninput = schedule;
 function drawSpark() {
   const svg = $("spark");
   svg.innerHTML = "";
-  if (history.length < 2) return;
+  if (runHistory.length < 2) return;
   const w = 200, h = 44, pad = 4;
-  const max = Math.max(...history, 1);
-  const x = (i) => pad + (i * (w - pad * 2)) / (history.length - 1);
+  const max = Math.max(...runHistory, 1);
+  const x = (i) => pad + (i * (w - pad * 2)) / (runHistory.length - 1);
   const y = (v) => h - pad - (v / max) * (h - pad * 2);
-  const pts = history.map((v, i) => `${x(i)},${y(v)}`).join(" ");
+  const pts = runHistory.map((v, i) => `${x(i)},${y(v)}`).join(" ");
   const area = document.createElementNS("http://www.w3.org/2000/svg", "polygon");
-  area.setAttribute("points", `${pad},${h - pad} ${pts} ${x(history.length - 1)},${h - pad}`);
+  area.setAttribute("points", `${pad},${h - pad} ${pts} ${x(runHistory.length - 1)},${h - pad}`);
   area.setAttribute("fill", "currentColor");
   area.setAttribute("opacity", ".13");
   const line = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
@@ -206,8 +225,8 @@ function drawSpark() {
   line.setAttribute("stroke-width", "1.5");
   line.setAttribute("vector-effect", "non-scaling-stroke");
   const dot = document.createElementNS("http://www.w3.org/2000/svg", "circle");
-  dot.setAttribute("cx", x(history.length - 1));
-  dot.setAttribute("cy", y(history[history.length - 1]));
+  dot.setAttribute("cx", x(runHistory.length - 1));
+  dot.setAttribute("cy", y(runHistory[runHistory.length - 1]));
   dot.setAttribute("r", "2.5");
   dot.setAttribute("fill", "var(--accent)");
   svg.style.color = "var(--accent)";
@@ -298,8 +317,8 @@ async function run() {
     $("typed-when").textContent = `${ms} ms · 1 pass · ${qs.length} question${qs.length === 1 ? "" : "s"}`;
     $("typed-when").className = "pill good";
 
-    history.push(ms);
-    if (history.length > 40) history.shift();
+    runHistory.push(ms);
+    if (runHistory.length > 40) runHistory.shift();
     $("m-latency").textContent = `${ms} ms`;
     $("m-passes").textContent = "1";
     $("m-questions").textContent = String(qs.length);
@@ -409,7 +428,9 @@ $("dtype").onchange = $("device").onchange;
   loadPreset(readUrlState());
 
   // Report the resolved backend before anyone spends 300 MB finding out.
-  const { detectWebGPU, resolveDevice, resolveDtype } = await import("../src/index.mjs");
+  // Statically imported on purpose: a dynamic import of a module that is also
+  // statically imported makes Rollup emit a broken interop wrapper, and the
+  // failure is a silent unhandled rejection rather than a build error.
   const gpu = await detectWebGPU();
   const dev = resolveDevice({ device: "auto", webgpu: gpu });
   $("info").textContent = gpu
