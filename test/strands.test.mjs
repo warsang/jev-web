@@ -53,6 +53,33 @@ test("renderStrandsContent flattens strings and JSON-dumps objects", () => {
   assert.equal(renderStrandsContent({ b: 1, a: 2 }), JSON.stringify({ b: 1, a: 2 }, null, 2));
 });
 
+test("renderStrandsQuestion supports choice criteria with descriptions", () => {
+  const q = {
+    type: "choice",
+    instructions: "What language?",
+    options: ["english", "zulu", "dutch"],
+    criteria: { english: "English", zulu: "isiZulu", dutch: "Nederlands" },
+  };
+  const rq = renderStrandsQuestion(q);
+  assert.deepEqual(rq.slotLabels, ["english", "zulu", "dutch"]);
+  assert.deepEqual(rq.slotDescriptions, ["English", "isiZulu", "Nederlands"]);
+  assert.ok(rq.text.includes("1. english \u2014 English"));
+  assert.ok(rq.text.includes("3. dutch \u2014 Nederlands"));
+});
+
+test("renderStrandsQuestion supports noul criteria overrides", () => {
+  const q = {
+    type: "noul",
+    instructions: "Is it urgent?",
+    options: ["no", "yes"],
+    criteria: { true: "the statement clearly holds" },
+  };
+  const rq = renderStrandsQuestion(q);
+  assert.deepEqual(rq.slotLabels, ["false", "true"]);
+  assert.ok(rq.text.includes("1. false \u2014 the statement does not hold for this state"));
+  assert.ok(rq.text.includes("2. true \u2014 the statement clearly holds"));
+});
+
 test("renderStrandsQuestion mirrors the reference prompt layout", () => {
   const rq = renderStrandsQuestion(choice3);
   assert.equal(rq.kind, "choice");
@@ -67,8 +94,11 @@ test("renderStrandsQuestion mirrors the reference prompt layout", () => {
 
   const nq = renderStrandsQuestion(noul);
   assert.equal(nq.kind, "noul");
-  assert.ok(nq.text.includes("1. no \u2014 the statement does not hold for this state"));
-  assert.ok(nq.text.includes("2. yes \u2014 the statement holds for this state"));
+  // Noul slot labels are fixed false/true by the reference; question.options
+  // only names the answer keys.
+  assert.deepEqual(nq.slotLabels, ["false", "true"]);
+  assert.ok(nq.text.includes("1. false \u2014 the statement does not hold for this state"));
+  assert.ok(nq.text.includes("2. true \u2014 the statement holds for this state"));
 
   const sq = renderStrandsQuestion(score3);
   assert.equal(sq.kind, "score");
@@ -125,7 +155,11 @@ test("buildStrandsBatch places exact option positions and budgets the window", (
   const b = collateStrandsItems(items);
   assert.equal(b.n, 3);
   assert.equal(b.K, 3);
-  assert.equal(b.optIdx[1 * b.K + 2], -1n, "short rows pad opt_idx with -1");
+  assert.equal(b.optionPos[1 * b.K + 2], 0n, "short rows pad option_pos with 0 (clamped)");
+  assert.ok(b.optionPos[0] > 0n, "real option positions survive");
+  items.forEach((it, i) => {
+    assert.equal(b.answerPos[i], BigInt(it.ids.length - 1), "answer_pos is the last real token");
+  });
   // attention covers the full rectangle
   assert.equal(Number(b.attention.reduce((a, v) => a + v, 0n)), items.reduce((a, it) => a + it.ids.length, 0));
 });
@@ -234,11 +268,13 @@ function fakeOrt() {
     run: async (inputs) => {
       calls.push(inputs);
       const n = inputs.input_ids.dims[0];
-      const K = inputs.opt_idx.dims[1];
+      const K = inputs.option_pos.dims[1];
       const data = new Float32Array(n * K).fill(-100);
       for (let i = 0; i < n; i++) {
+        // real option positions are always > 0 (state + BOS precede them);
+        // padded slots are 0.
         let k = 0;
-        for (let j = 0; j < K; j++) if (inputs.opt_idx.data[i * K + j] >= 0n) k++;
+        for (let j = 0; j < K; j++) if (inputs.option_pos.data[i * K + j] > 0n) k++;
         data[i * K + (k - 1)] = 5; // last option wins every row
       }
       return { logits: new Tensor("float32", data, [n, K]) };
@@ -275,8 +311,9 @@ test("createStrandsDecider wires tokenizer + session and decodes all three kinds
   assert.equal(ort.__calls.length, 1, "one fused forward for the whole batch");
   const inputs = ort.__calls[0];
   assert.deepEqual(inputs.input_ids.dims[0], 3);
-  assert.deepEqual(inputs.opt_idx.dims, [3, 3], "opt_idx is [batch, maxOptions]");
-  assert.ok(inputs.opt_idx.data[1 * 3 + 2] === -1n, "short rows pad with -1");
+  assert.deepEqual(inputs.option_pos.dims, [3, 3], "option_pos is [batch, maxOptions]");
+  assert.ok(inputs.option_pos.data[1 * 3 + 2] === 0n, "short rows pad with 0");
+  assert.deepEqual(inputs.answer_pos.dims, [3], "answer_pos is [batch]");
 
   assert.equal(answers.length, 3);
   assert.equal(answers[0].type, "choice");

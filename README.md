@@ -295,7 +295,8 @@ whole batch:
 import { createStrandsDecider } from "jev-web";
 
 const decider = await createStrandsDecider({
-  // defaults to warsang/strands-decider-2b-web @ pinned revision
+  // defaults to onnx-community/strands-decider-2B-hobson-v19-ONNX @ pinned
+  // revision, q8 (onnx/model_quantized.onnx)
   onProgress: (p) => console.log(p.phase, p.loaded, p.total),
 });
 const { answers } = await decider.decide(stateText, questions);
@@ -304,10 +305,14 @@ const { answers } = await decider.decide(stateText, questions);
 Protocol implemented here (mirrors the reference Python runtime):
 
 - prompt `<state>…</state><question type="{noul|choice|score}">…<options>\n1. …\n</options></question><answer>`;
-- graph `input_ids, attention_mask, opt_idx → logits`, where `opt_idx` carries
-  each option line's last-token position (padded with -1); the prompt is
-  tokenised in chunks at pre-tokeniser piece boundaries so those positions are
-  exact with no offset mapping;
+- graph `input_ids, attention_mask, answer_pos, option_pos → logits`, where
+  `answer_pos` is each row's last real token (the `<answer>` pooling position)
+  and `option_pos` carries each option line's last-token position (padded with
+  0); the prompt is tokenised in chunks at pre-tokeniser piece boundaries so
+  those positions are exact with no offset mapping;
+- choice questions accept `criteria` as `{label: description}` (mirroring the
+  reference schema); noul slots are fixed `false`/`true` with overridable
+  rubric descriptions;
 - the question gets first claim on the 4096-token window (up to 75%), the state
   is truncated from the right into what remains, and an over-long question is
   truncated from the front, keeping the options and `<answer>`;

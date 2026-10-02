@@ -7,23 +7,27 @@
  *   prompt:  <state>\n{state}\n</state>\n
  *            <question type="{kind}">\n{header}\n{instructions}\n<options>\n
  *            1. {label} — {description}\n…\n</options>\n</question>\n<answer>
- *   graph:   input_ids, attention_mask, opt_idx -> logits [B, K]
- *            (torso with LoRA merged; pointer head: LayerNorm -> q/k linears ->
- *             scaled dot of <answer>-position state vs each option's last token)
+ *   graph:   input_ids, attention_mask, answer_pos, option_pos -> logits [B, K]
+ *            (torso with LoRA merged; pointer head fused in-graph: LayerNorm ->
+ *             q/k linears -> scaled dot of the answer-position state vs each
+ *             option's last token)
  *   decode:  per-kind temperature (noul / choice / score) then softmax;
  *            score confidence is ordinal (spread-based), not max-probability.
  *
- * The browser export used here is a single fused fp16 ONNX graph
- * (warsang/strands-decider-2b-web, pinned by revision).
+ * The browser export used here is the validated onnx-community build
+ * (onnx-community/strands-decider-2B-hobson-v19-ONNX, pinned by revision):
+ * q8 `onnx/model_quantized.onnx` by default, q4f16 `onnx/model_q4f16.onnx`
+ * as the smaller opt-in.
  */
 
 import { normalizeQuestions } from "./questions.mjs";
 import { softmaxWithTemperature } from "./answers.mjs";
 import { fetchCachedBytes, fetchOnnxExternalData } from "./laya.mjs";
 
-export const STRANDS_DEFAULT_MODEL = "warsang/strands-decider-2b-web";
-export const STRANDS_DEFAULT_REVISION = "main"; // pin to the export commit once it lands
-export const STRANDS_DEFAULT_FILE = "model.onnx";
+export const STRANDS_DEFAULT_MODEL = "onnx-community/strands-decider-2B-hobson-v19-ONNX";
+export const STRANDS_DEFAULT_REVISION = "31a83e0244b26d939ae33f87189d6c8204003e53";
+export const STRANDS_DEFAULT_FILE = "onnx/model_quantized.onnx";
+export const STRANDS_Q4F16_FILE = "onnx/model_q4f16.onnx";
 
 /** Reference calibration from the checkpoint's hobson_config.json. */
 export const STRANDS_TEMPERATURE = 0.9627721607677362;
@@ -94,18 +98,27 @@ export function renderStrandsQuestion(question) {
   let slotDescriptions;
   let kind;
   if (question.type === "noul") {
-    const [noLabel, yesLabel] = question.options;
+    // The reference fixes noul slot labels to false/true; `criteria` only
+    // overrides the rubric descriptions (mirrors prompting.NOUL_DEFAULT_CRITERIA).
+    // `question.options` still names the answer keys, not the prompt.
+    const crit = { ...NOUL_DEFAULT_CRITERIA, ...(question.criteria ?? {}) };
     pairs = [
-      [noLabel, NOUL_DEFAULT_CRITERIA.false],
-      [yesLabel, NOUL_DEFAULT_CRITERIA.true],
+      ["false", crit.false],
+      ["true", crit.true],
     ];
-    slotLabels = [noLabel, yesLabel];
-    slotDescriptions = [NOUL_DEFAULT_CRITERIA.false, NOUL_DEFAULT_CRITERIA.true];
+    slotLabels = ["false", "true"];
+    slotDescriptions = [crit.false, crit.true];
     kind = "noul";
   } else if (question.type === "choice") {
-    pairs = question.options.map((o) => [o, ""]);
-    slotLabels = [...question.options];
-    slotDescriptions = question.options.map(() => "");
+    // `criteria` as {label: description} mirrors the reference schema and the
+    // typed-decisions fixtures; plain `options` keep working with empty rubrics.
+    if (question.criteria && typeof question.criteria === "object" && !Array.isArray(question.criteria)) {
+      pairs = Object.entries(question.criteria).map(([k, v]) => [String(k), String(v ?? "")]);
+    } else {
+      pairs = question.options.map((o) => [o, ""]);
+    }
+    slotLabels = pairs.map(([k]) => k);
+    slotDescriptions = pairs.map(([, v]) => v);
     kind = "choice";
   } else if (question.type === "score") {
     // Level index is the label; the rubric text is the description.
@@ -248,19 +261,28 @@ export function buildStrandsBatch({
   return { items, truncated };
 }
 
-/** Pad a batch of Strands items into int64 tensors. opt_idx pads with -1. */
+/**
+ * Pad a batch of Strands items into int64 tensors for the onnx-community
+ * graph (input_ids, attention_mask, answer_pos, option_pos).
+ *
+ * answer_pos is each row's last real token (the `<answer>` pooling position);
+ * option_pos clamps the -1 padding to 0 (mirrors the reference readout) —
+ * padded slots are never read back, each question only takes its first k logits.
+ */
 export function collateStrandsItems(items) {
   const n = items.length;
   const L = Math.max(...items.map((it) => it.ids.length));
   const K = Math.max(...items.map((it) => it.optIdx.length));
   const inputIds = new BigInt64Array(n * L);
   const attention = new BigInt64Array(n * L);
-  const optIdx = new BigInt64Array(n * K).fill(-1n);
+  const optionPos = new BigInt64Array(n * K);
+  const answerPos = new BigInt64Array(n);
   items.forEach((it, i) => {
     it.ids.forEach((v, j) => { inputIds[i * L + j] = BigInt(v); attention[i * L + j] = 1n; });
-    it.optIdx.forEach((p, j) => { optIdx[i * K + j] = BigInt(p); });
+    it.optIdx.forEach((p, j) => { optionPos[i * K + j] = BigInt(Math.max(0, p)); });
+    answerPos[i] = BigInt(it.ids.length - 1);
   });
-  return { n, L, K, inputIds, attention, optIdx };
+  return { n, L, K, inputIds, attention, optionPos, answerPos };
 }
 
 /** Normalised max-probability confidence (mirrors schema.derive_confidence). */
@@ -325,9 +347,9 @@ export function strandsAnswersFromLogits({
       const best = probs.indexOf(Math.max(...probs));
       answers.push({
         type: "choice",
-        choice: q.options[best],
+        choice: rq.slotLabels[best],
         index: best,
-        probabilities: Object.fromEntries(q.options.map((o, j) => [o, probs[j]])),
+        probabilities: Object.fromEntries(rq.slotLabels.map((o, j) => [o, probs[j]])),
         confidence: strandsChoiceConfidence(probs),
       });
     } else if (rq.kind === "score") {
@@ -481,7 +503,8 @@ export async function createStrandsDecider({
       const out = await session.run({
         input_ids: int64(b.inputIds, [b.n, b.L]),
         attention_mask: int64(b.attention, [b.n, b.L]),
-        opt_idx: int64(b.optIdx, [b.n, b.K]),
+        answer_pos: int64(b.answerPos, [b.n]),
+        option_pos: int64(b.optionPos, [b.n, b.K]),
       });
       const runMs = now() - tRun;
       const logits = out.logits ?? out[Object.keys(out)[0]];
