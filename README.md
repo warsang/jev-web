@@ -4,11 +4,15 @@
 [![license](https://img.shields.io/npm/l/jev-web.svg)](./LICENSE)
 [![CI](https://github.com/warsang/jev-web/actions/workflows/test.yml/badge.svg)](https://github.com/warsang/jev-web/actions/workflows/test.yml)
 
-Run **open-jev-shaped typed-decision models** in the browser. One *state* text
+Run **typed-decision models** in the browser. One *state* text
 plus any number of typed *questions* (`choice` / `score` / `noul`) go in; a
 calibrated probability distribution per question comes back from a **single
 forward pass**. No server, no API keys, no network calls after the weights are
 cached.
+
+Three model families ship today — open-jev (fused DeBERTa graph), Laya
+(ModernBERT encoder + typed head), and Strands Decider 2B (Qwen torso + pointer
+head) — behind one registry: `createDecisionRuntime({ family, fallback })`.
 
 This is a generic runtime, not a classifier for any particular domain. You bring
 the state text and the questions; the model answers by choosing among the options
@@ -220,10 +224,10 @@ tries the requested family and then any fallbacks, returning the shared contract
 ```js
 import { createDecisionRuntime, listDecisionFamilies } from "jev-web";
 
-listDecisionFamilies(); // ["open-jev", "laya"]
+listDecisionFamilies(); // ["open-jev", "laya", "strands-decider"]
 const runtime = await createDecisionRuntime({
-  family: "laya",
-  fallback: ["open-jev"],
+  family: "strands-decider",
+  fallback: ["laya", "open-jev"],
   onFallback: ({ family, error }) => console.warn(family, error),
 });
 const { answers, truncated, length, prompts, timings } = await runtime.decide(state, questions);
@@ -278,6 +282,44 @@ Lower-level helpers are exported for custom runtimes:
 `buildLayaSequence`, `collateLayaItems`, `layaAnswersFromLogits`,
 `layaTokenizerAdapter`, `renderLayaOptions`, `layaTempBucket`, `clampTemperature`.
 
+## Strands Decider family (Qwen torso + pointer head)
+
+`createStrandsDecider(options)` runs
+[Strands Decider 2B](https://strandsagents.com/blog/introducing-strands-decider/),
+a 2B-parameter decision model: a Qwen3.5-2B torso (LoRA merged) with its LM head
+replaced by a pointer head that scores each option from its own hidden state
+against the `<answer>` position. One fused ONNX graph, one forward pass for the
+whole batch:
+
+```js
+import { createStrandsDecider } from "jev-web";
+
+const decider = await createStrandsDecider({
+  // defaults to warsang/strands-decider-2b-web @ pinned revision
+  onProgress: (p) => console.log(p.phase, p.loaded, p.total),
+});
+const { answers } = await decider.decide(stateText, questions);
+```
+
+Protocol implemented here (mirrors the reference Python runtime):
+
+- prompt `<state>…</state><question type="{noul|choice|score}">…<options>\n1. …\n</options></question><answer>`;
+- graph `input_ids, attention_mask, opt_idx → logits`, where `opt_idx` carries
+  each option line's last-token position (padded with -1); the prompt is
+  tokenised in chunks at pre-tokeniser piece boundaries so those positions are
+  exact with no offset mapping;
+- the question gets first claim on the 4096-token window (up to 75%), the state
+  is truncated from the right into what remains, and an over-long question is
+  truncated from the front, keeping the options and `<answer>`;
+- per-kind calibration from the checkpoint (`noul` 0.911 / `choice` 0.734 /
+  `score` 1.328); `score` confidence is ordinal (spread-based, with the
+  training smoothing floor), not max-probability.
+
+Lower-level helpers are exported for custom runtimes:
+`renderStrandsQuestion`, `renderStrandsState`, `renderStrandsContent`,
+`buildStrandsBatch`, `collateStrandsItems`, `strandsOptionTokenIndices`,
+`strandsAnswersFromLogits`, `strandsChoiceConfidence`, `strandsScoreConfidence`.
+
 ## Worker / thread
 
 `jev-web` does not bundle a worker, so hosts can create one the way their
@@ -294,6 +336,7 @@ import { createDecider } from "jev-web";
 
 - `createDecider(options)` → open-jev family: `{ info, decide, decideMany, dispose }`
 - `createLayaDecider(options)` → Laya family: `{ info, decide, dispose }` (same `decide` contract)
+- `createStrandsDecider(options)` → Strands Decider family: `{ info, decide, dispose }` (same `decide` contract)
 - `normalizeQuestions`, `buildDecisionInput`, `typedMarkerIds`, `answersFromScores`,
   `softmaxWithTemperature`, `resolveDevice`, `resolveDtype`, `detectWebGPU`,
   `loadModelConfig`, defaults (model/revision/temperature/caps).

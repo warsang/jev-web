@@ -29,6 +29,27 @@ export {
   LAYA_TEMP_MAX,
 } from "./laya.mjs";
 export {
+  createStrandsDecider,
+  renderStrandsQuestion,
+  renderStrandsState,
+  renderStrandsContent,
+  buildStrandsBatch,
+  collateStrandsItems,
+  strandsOptionTokenIndices,
+  strandsAnswersFromLogits,
+  strandsChoiceConfidence,
+  strandsScoreConfidence,
+  STRANDS_DEFAULT_MODEL,
+  STRANDS_DEFAULT_REVISION,
+  STRANDS_DEFAULT_FILE,
+  STRANDS_TEMPERATURE,
+  STRANDS_TEMPERATURE_BY_KIND,
+  STRANDS_ORDINAL_SMOOTHING,
+  STRANDS_DEFAULT_MAX_LEN,
+  STRANDS_MAX_QUESTION_FRACTION,
+  STRANDS_KIND,
+} from "./strands.mjs";
+export {
   DEFAULT_MODEL,
   DEFAULT_REVISION,
   DEFAULT_TEMPERATURE,

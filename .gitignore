@@ -4,3 +4,12 @@ dist-dev/
 dist-demo/
 *.log
 .DS_Store
+
+# strands-decider export: weights are GBs and never committed (re-download/re-merge on the build box)
+export/**/*.safetensors
+export/**/*.onnx
+export/**/*.data
+export/**/*.npz
+export/**/base/
+export/**/ckpt/
+export/**/merged/
