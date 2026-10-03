@@ -15,6 +15,8 @@ import {
   createDecision2Decider,
   DECISION2_DEFAULT_MODEL,
   DECISION2_DEFAULT_REVISION,
+  DECISION2_EOS_MODEL,
+  DECISION2_VARIANTS,
 } from "../src/decision2.mjs";
 import { normalizeQuestions } from "../src/questions.mjs";
 
@@ -175,4 +177,24 @@ test("createDecision2Decider batches questions and decodes answers", async () =>
   assert.deepEqual(inputs.option_pos.dims, [3, 2]);
 
   await decider.dispose();
+});
+
+test("createDecision2Decider variant shortcut selects eos/sol", async () => {
+  const ort = fakeOrt();
+  const decider = await createDecision2Decider({
+    variant: "eos",
+    ort,
+    transformers: fakeTransformers(),
+    fetchImpl: fakeFetch(CONFIG),
+    device: "wasm",
+    sessionFactory: async (url, opts) => ort.InferenceSession.create(url, opts),
+  });
+  assert.equal(decider.info.model, DECISION2_EOS_MODEL);
+  assert.equal(decider.info.maxLength, DECISION2_VARIANTS.eos.maxLength);
+  await decider.dispose();
+
+  await assert.rejects(
+    createDecision2Decider({ variant: "nope", ort: fakeOrt() }),
+    /unknown variant/,
+  );
 });

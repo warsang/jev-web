@@ -35,6 +35,28 @@ export const DECISION2_EOS_REVISION = "6369be38417e";
 export const DECISION2_SOL_MODEL = "onnx-community/Decision-2.0-Sol-2B-ONNX";
 export const DECISION2_SOL_REVISION = "5b3478e05ce3";
 
+/** Named variants with their pinned revisions and context sizes. */
+export const DECISION2_VARIANTS = {
+  kai: {
+    model: DECISION2_DEFAULT_MODEL,
+    revision: DECISION2_DEFAULT_REVISION,
+    maxLength: 8192,
+    description: "0.6B, 0.61 GB q8",
+  },
+  eos: {
+    model: DECISION2_EOS_MODEL,
+    revision: DECISION2_EOS_REVISION,
+    maxLength: 16384,
+    description: "0.8B, q8/q4f16",
+  },
+  sol: {
+    model: DECISION2_SOL_MODEL,
+    revision: DECISION2_SOL_REVISION,
+    maxLength: 16384,
+    description: "2B, q8/q4f16",
+  },
+};
+
 export const DECISION2_NOUL_DESCRIPTIONS = { false: "No", true: "Yes" };
 const DECISION_SUFFIX = "Select the single option best supported by the context and instructions.";
 
@@ -201,6 +223,7 @@ const hfUrl = (model, revision, ...parts) =>
 export async function createDecision2Decider({
   model = DECISION2_DEFAULT_MODEL,
   revision = DECISION2_DEFAULT_REVISION,
+  variant = null,
   file = DECISION2_DEFAULT_FILE,
   configUrl = null,
   ort = null,
@@ -213,6 +236,14 @@ export async function createDecision2Decider({
   maxLength = DECISION2_MAX_INPUT_TOKENS,
   scope = globalThis,
 } = {}) {
+  // Named variant shortcut: {variant: "eos"} sets model/revision/maxLength.
+  if (variant) {
+    const v = DECISION2_VARIANTS[variant];
+    if (!v) throw new TypeError(`decision2: unknown variant "${variant}" (kai, eos, sol)`);
+    model = v.model;
+    revision = v.revision;
+    maxLength = v.maxLength;
+  }
   const ortMod = ort ?? (await import("onnxruntime-web"));
   const tf = transformers ?? (await import("@huggingface/transformers"));
   if (wasmPaths) {

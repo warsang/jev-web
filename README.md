@@ -383,6 +383,9 @@ const decider = await createDecision2Decider({
   // q8 (onnx/model_quantized.onnx, 0.61 GB)
   onProgress: (p) => console.log(p.phase, p.loaded, p.total),
 });
+// or pick a larger sibling:
+// await createDecision2Decider({ variant: "eos" }); // 0.8B, 16k context
+// await createDecision2Decider({ variant: "sol" }); // 2B, 16k context
 const { answers } = await decider.decide(stateText, questions);
 ```
 
@@ -397,9 +400,11 @@ Protocol implemented here (mirrors the reference `decision2` runtime):
 - score questions add the per-level `score_bias` from `config.json` before the
   softmax (temperature 1).
 
-Larger siblings are available via the exported model/revision constants:
-`DECISION2_EOS_MODEL` / `DECISION2_EOS_REVISION` (0.8B) and
-`DECISION2_SOL_MODEL` / `DECISION2_SOL_REVISION` (2B).
+Larger siblings are available via the `variant` option (`"kai"`, `"eos"`,
+`"sol"`) or the exported model/revision constants: `DECISION2_EOS_MODEL` /
+`DECISION2_EOS_REVISION` (0.8B) and `DECISION2_SOL_MODEL` /
+`DECISION2_SOL_REVISION` (2B). The `DECISION2_VARIANTS` map carries each
+variant's pinned revision and context size.
 
 Lower-level helpers are exported for custom runtimes:
 `renderDecision2Content`, `renderDecision2Options`, `buildDecision2Segments`,
