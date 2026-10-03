@@ -412,17 +412,22 @@ async function readBytesWithProgress(res, url, onProgress) {
  *   has no external data (404) or the fetch fails.
  */
 export async function fetchOnnxExternalData(url, { fetchImpl = fetch, onProgress = null, force = false } = {}) {
-  const dataUrl = `${url}.data`;
-  const path = `${String(url).split("/").pop()}.data`;
-  try {
-    // Probe cheaply first: a 404 means the model has no external data.
-    const head = await fetchImpl(dataUrl, { method: "HEAD" }).catch(() => null);
-    if (head && !head.ok) return null;
-    const data = await fetchCachedBytes(dataUrl, { fetchImpl, onProgress, force, persist: true });
-    return { path, data };
-  } catch {
-    return null;
+  // Probe `<model>.onnx.data` (laya web-q8 layout) then `<model>.onnx_data`
+  // (onnx-community layout); a 404 on both means the model has no external data.
+  for (const suffix of [".data", "_data"]) {
+    const dataUrl = `${url}${suffix}`;
+    const path = `${String(url).split("/").pop()}${suffix}`;
+    try {
+      // Probe cheaply first: a 404 means "try the next suffix".
+      const head = await fetchImpl(dataUrl, { method: "HEAD" }).catch(() => null);
+      if (head && !head.ok) continue;
+      const data = await fetchCachedBytes(dataUrl, { fetchImpl, onProgress, force, persist: true });
+      return { path, data };
+    } catch {
+      // fall through to the next suffix
+    }
   }
+  return null;
 }
 
 /**

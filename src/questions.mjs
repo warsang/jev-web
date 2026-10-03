@@ -34,6 +34,6 @@ export function normalizeQuestions(questions) {
         throw new TypeError(`questions[${i}]: score needs 2-10 ordered levels`);
       }
     }
-    return { type, instructions, options };
+    return { type, instructions, options, ...(q?.criteria !== undefined ? { criteria: q.criteria } : {}) };
   });
 }

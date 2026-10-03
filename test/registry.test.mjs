@@ -23,8 +23,12 @@ test("built-in families are registered", () => {
   const ids = listDecisionFamilies();
   assert.ok(ids.includes("open-jev"));
   assert.ok(ids.includes("laya"));
+  assert.ok(ids.includes("strands-decider"));
+  assert.ok(ids.includes("bekko"));
   assert.equal(getDecisionFamily("open-jev").create.name, "createDecider");
   assert.equal(getDecisionFamily("laya").create.name, "createLayaDecider");
+  assert.equal(getDecisionFamily("strands-decider").create.name, "createStrandsDecider");
+  assert.equal(getDecisionFamily("bekko").create.name, "createBekkoDecider");
 });
 
 test("registerDecisionFamily validates descriptors", () => {
