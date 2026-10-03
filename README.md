@@ -11,8 +11,9 @@ forward pass**. No server, no API keys, no network calls after the weights are
 cached.
 
 Three model families ship today — open-jev (fused DeBERTa graph), Laya
-(ModernBERT encoder + typed head), and Strands Decider 2B (Qwen torso + pointer
-head) — behind one registry: `createDecisionRuntime({ family, fallback })`.
+(ModernBERT encoder + typed head), Strands Decider 2B (Qwen torso + pointer
+head), and Bekko System One v0 (Ettin cross-encoder) — behind one registry:
+`createDecisionRuntime({ family, fallback })`.
 
 This is a generic runtime, not a classifier for any particular domain. You bring
 the state text and the questions; the model answers by choosing among the options
@@ -224,7 +225,7 @@ tries the requested family and then any fallbacks, returning the shared contract
 ```js
 import { createDecisionRuntime, listDecisionFamilies } from "jev-web";
 
-listDecisionFamilies(); // ["open-jev", "laya", "strands-decider"]
+listDecisionFamilies(); // ["open-jev", "laya", "strands-decider", "bekko"]
 const runtime = await createDecisionRuntime({
   family: "strands-decider",
   fallback: ["laya", "open-jev"],
@@ -324,6 +325,46 @@ Lower-level helpers are exported for custom runtimes:
 `renderStrandsQuestion`, `renderStrandsState`, `renderStrandsContent`,
 `buildStrandsBatch`, `collateStrandsItems`, `strandsOptionTokenIndices`,
 `strandsAnswersFromLogits`, `strandsChoiceConfidence`, `strandsScoreConfidence`.
+
+## Bekko family (Ettin cross-encoder)
+
+`createBekkoDecider(options)` runs
+[Bekko System One v0](https://github.com/hotchpotch/bekko-system-one), a
+cross-encoder that scores each (query, candidate) pair: the query renders as
+`Instruction: {instruction}\nState: {state}` and every option becomes a
+`Candidate: {id}: {description}` document. One ONNX graph
+(`prefix_ids, prefix_mask, doc_ids, doc_mask, owners → logits [N, tasks]`),
+one forward per question, with candidates batched by the reference
+attention budget:
+
+```js
+import { createBekkoDecider } from "jev-web";
+
+const decider = await createBekkoDecider({
+  // defaults to hotchpotch/bekko-system-one-v0-17m @ pinned revision,
+  // onnx_browser/ (29 MB)
+  onProgress: (p) => console.log(p.phase, p.loaded, p.total),
+});
+const { answers } = await decider.decide(stateText, questions);
+```
+
+Protocol implemented here (mirrors the reference browser runtime,
+`browser/src/core.js` + `decision.js`, MIT):
+
+- query `[cls] Instruction: …\nState: … [sep]`; instruction and state split the
+  4096-token budget 50/50 with spillover; candidates truncate to 2048 tokens;
+- choice questions accept `criteria` as `{label: description}`; noul slots are
+  fixed `true`/`false` with authored meanings (overridable via criteria);
+- score levels map to numeric candidate values `0..n-1`; the answer is the
+  expected value plus the argmax level and a normalised score.
+
+Larger siblings are available via the exported model/revision constants:
+`BEKKO_68M_MODEL` / `BEKKO_68M_REVISION` and `BEKKO_400M_MODEL` /
+`BEKKO_400M_REVISION` (68M and 400M, same `onnx_browser/` layout).
+
+Lower-level helpers are exported for custom runtimes:
+`renderBekkoContent`, `renderBekkoRequest`, `tokenizeBekkoRequest`,
+`collateBekkoDocs`, `bekkoSoftmax`, `bekkoAnswerFromLogits`.
 
 ## Worker / thread
 

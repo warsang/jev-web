@@ -50,6 +50,26 @@ export {
   STRANDS_KIND,
 } from "./strands.mjs";
 export {
+  createBekkoDecider,
+  renderBekkoContent,
+  renderBekkoRequest,
+  tokenizeBekkoRequest,
+  collateBekkoDocs,
+  bekkoSoftmax,
+  bekkoAnswerFromLogits,
+  BEKKO_DEFAULT_MODEL,
+  BEKKO_DEFAULT_REVISION,
+  BEKKO_DEFAULT_SUBDIR,
+  BEKKO_68M_MODEL,
+  BEKKO_68M_REVISION,
+  BEKKO_400M_MODEL,
+  BEKKO_400M_REVISION,
+  BEKKO_ATTENTION_BUDGET,
+  BEKKO_DEFAULT_YES,
+  BEKKO_DEFAULT_NO,
+  BEKKO_NOUL_DESCRIPTIONS,
+} from "./bekko.mjs";
+export {
   DEFAULT_MODEL,
   DEFAULT_REVISION,
   DEFAULT_TEMPERATURE,
