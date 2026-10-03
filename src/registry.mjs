@@ -1,10 +1,11 @@
 /**
  * registry.mjs — multi-family runtime for JEV-style typed-decision models.
  *
- * jev-web ships three families today (open-jev's fused DeBERTa graph, Laya's
- * ModernBERT encoder + typed head, Strands Decider 2B's Qwen torso + pointer
- * head, and Bekko System One v0's cross-encoder) and any third party can add
- * its own without touching core:
+ * jev-web ships three families today — open-jev (fused DeBERTa graph), Laya
+ * (ModernBERT encoder + typed head), Strands Decider 2B (Qwen torso + pointer
+ * head), Bekko System One v0 (cross-encoder), and Decision 2.0 (Qwen3 +
+ * candidate head) — and any third party can add its own without touching
+ * core:
  *
  *   registerDecisionFamily("my-model", {
  *     defaults: { model: "org/my-typed-decision-ONNX", revision: "main" },
@@ -38,6 +39,11 @@ import {
   BEKKO_DEFAULT_MODEL,
   BEKKO_DEFAULT_REVISION,
 } from "./bekko.mjs";
+import {
+  createDecision2Decider,
+  DECISION2_DEFAULT_MODEL,
+  DECISION2_DEFAULT_REVISION,
+} from "./decision2.mjs";
 
 const families = new Map();
 
@@ -92,6 +98,14 @@ registerDecisionFamily("bekko", {
     revision: BEKKO_DEFAULT_REVISION,
   },
   create: createBekkoDecider,
+});
+
+registerDecisionFamily("decision2", {
+  defaults: {
+    model: DECISION2_DEFAULT_MODEL,
+    revision: DECISION2_DEFAULT_REVISION,
+  },
+  create: createDecision2Decider,
 });
 
 /**

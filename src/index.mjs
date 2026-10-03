@@ -70,6 +70,24 @@ export {
   BEKKO_NOUL_DESCRIPTIONS,
 } from "./bekko.mjs";
 export {
+  createDecision2Decider,
+  renderDecision2Content,
+  renderDecision2Options,
+  buildDecision2Segments,
+  tokenizeDecision2Segments,
+  decision2Softmax,
+  decision2AnswerFromLogits,
+  DECISION2_DEFAULT_MODEL,
+  DECISION2_DEFAULT_REVISION,
+  DECISION2_DEFAULT_FILE,
+  DECISION2_EOS_MODEL,
+  DECISION2_EOS_REVISION,
+  DECISION2_SOL_MODEL,
+  DECISION2_SOL_REVISION,
+  DECISION2_MAX_INPUT_TOKENS,
+  DECISION2_NOUL_DESCRIPTIONS,
+} from "./decision2.mjs";
+export {
   DEFAULT_MODEL,
   DEFAULT_REVISION,
   DEFAULT_TEMPERATURE,

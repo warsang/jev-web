@@ -12,8 +12,8 @@ cached.
 
 Three model families ship today — open-jev (fused DeBERTa graph), Laya
 (ModernBERT encoder + typed head), Strands Decider 2B (Qwen torso + pointer
-head), and Bekko System One v0 (Ettin cross-encoder) — behind one registry:
-`createDecisionRuntime({ family, fallback })`.
+head), Bekko System One v0 (Ettin cross-encoder), and Decision 2.0 (Qwen3 +
+candidate head) — behind one registry: `createDecisionRuntime({ family, fallback })`.
 
 This is a generic runtime, not a classifier for any particular domain. You bring
 the state text and the questions; the model answers by choosing among the options
@@ -225,7 +225,7 @@ tries the requested family and then any fallbacks, returning the shared contract
 ```js
 import { createDecisionRuntime, listDecisionFamilies } from "jev-web";
 
-listDecisionFamilies(); // ["open-jev", "laya", "strands-decider", "bekko"]
+listDecisionFamilies(); // ["open-jev", "laya", "strands-decider", "bekko", "decision2"]
 const runtime = await createDecisionRuntime({
   family: "strands-decider",
   fallback: ["laya", "open-jev"],
@@ -365,6 +365,45 @@ Larger siblings are available via the exported model/revision constants:
 Lower-level helpers are exported for custom runtimes:
 `renderBekkoContent`, `renderBekkoRequest`, `tokenizeBekkoRequest`,
 `collateBekkoDocs`, `bekkoSoftmax`, `bekkoAnswerFromLogits`.
+
+## Decision 2.0 family (Qwen3 + candidate head)
+
+`createDecision2Decider(options)` runs
+[vLLM Semantic Router Decision 2.0](https://huggingface.co/collections/vllm-sr/decision-20),
+a Qwen3 fine-tune with a candidate head: one prompt per question, each option
+rendered as a `{"description": …, "key": …}` JSON segment. One ONNX graph
+(`input_ids, attention_mask, answer_pos, option_pos → logits [B, K]`), one
+forward pass for the whole batch:
+
+```js
+import { createDecision2Decider } from "jev-web";
+
+const decider = await createDecision2Decider({
+  // defaults to onnx-community/Decision-2.0-Kai-0.6B-ONNX @ pinned revision,
+  // q8 (onnx/model_quantized.onnx, 0.61 GB)
+  onProgress: (p) => console.log(p.phase, p.loaded, p.total),
+});
+const { answers } = await decider.decide(stateText, questions);
+```
+
+Protocol implemented here (mirrors the reference `decision2` runtime):
+
+- segments `Context:` / `Task type:` / `Question:` / `Options:` / one
+  `<option>` JSON segment per option / the `Decision:` suffix, each tokenized
+  separately so `option_pos` (last token of each `</option>`) and `answer_pos`
+  (last token) are exact — validated 11/11 against the reference fixtures;
+- choice questions accept `criteria` as `{label: description}` (empty
+  descriptions encode as `null`); noul slots are fixed `false`/`true`;
+- score questions add the per-level `score_bias` from `config.json` before the
+  softmax (temperature 1).
+
+Larger siblings are available via the exported model/revision constants:
+`DECISION2_EOS_MODEL` / `DECISION2_EOS_REVISION` (0.8B) and
+`DECISION2_SOL_MODEL` / `DECISION2_SOL_REVISION` (2B).
+
+Lower-level helpers are exported for custom runtimes:
+`renderDecision2Content`, `renderDecision2Options`, `buildDecision2Segments`,
+`tokenizeDecision2Segments`, `decision2Softmax`, `decision2AnswerFromLogits`.
 
 ## Worker / thread
 
