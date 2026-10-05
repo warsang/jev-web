@@ -12,8 +12,9 @@ cached.
 
 Three model families ship today — open-jev (fused DeBERTa graph), Laya
 (ModernBERT encoder + typed head), Strands Decider 2B (Qwen torso + pointer
-head), Bekko System One v0 (Ettin cross-encoder), and Decision 2.0 (Qwen3 +
-candidate head) — behind one registry: `createDecisionRuntime({ family, fallback })`.
+head), Bekko System One v0 (Ettin cross-encoder), Decision 2.0 (Qwen3 +
+candidate head), and Kev (Qwen3 + pointer head) — behind one registry:
+`createDecisionRuntime({ family, fallback })`.
 
 This is a generic runtime, not a classifier for any particular domain. You bring
 the state text and the questions; the model answers by choosing among the options
@@ -225,7 +226,7 @@ tries the requested family and then any fallbacks, returning the shared contract
 ```js
 import { createDecisionRuntime, listDecisionFamilies } from "jev-web";
 
-listDecisionFamilies(); // ["open-jev", "laya", "strands-decider", "bekko", "decision2"]
+listDecisionFamilies(); // ["open-jev", "laya", "strands-decider", "bekko", "decision2", "kev"]
 const runtime = await createDecisionRuntime({
   family: "strands-decider",
   fallback: ["laya", "open-jev"],
@@ -414,6 +415,46 @@ variant's pinned revision and context size.
 Lower-level helpers are exported for custom runtimes:
 `renderDecision2Content`, `renderDecision2Options`, `buildDecision2Segments`,
 `tokenizeDecision2Segments`, `decision2Softmax`, `decision2AnswerFromLogits`.
+
+## Kev family (Qwen3 + pointer head)
+
+`createKevDecider(options)` runs
+[Kev](https://huggingface.co/jaredpalmer/kev-0.6b) (Apache-2.0), a typed
+decision model: one state and any number of typed questions are packed into a
+single sequence with five delimiter tokens; a block-causal mask derived
+in-graph lets every question see the state and itself only, and a pointer head
+scores each option's `</opt>` token against its question's `<decide>` token.
+One ONNX graph (`input_ids, attention_mask → logits [B, seq]`), one forward
+pass for the whole batch — read the logit at each option's `</opt>` position
+and softmax within the question:
+
+```js
+import { createKevDecider } from "jev-web";
+
+const decider = await createKevDecider({
+  // defaults to onnx-community/kev-0.6b-ONNX @ pinned revision,
+  // onnx/model_q4f16.onnx (335 MB)
+  onProgress: (p) => console.log(p.phase, p.loaded, p.total),
+});
+// or pick the larger sibling:
+// await createKevDecider({ variant: "4b" }); // 1.07 GB, #29 on the Decision Index
+const { answers } = await decider.decide(stateText, questions);
+```
+
+Protocol implemented here (mirrors the reference JS in the model README):
+
+- delimiters `<|fim_prefix|>` (state), `<|fim_middle|>` (question),
+  `<|box_start|>` / `<|box_end|>` (option), `<|fim_suffix|>` (decide); ids
+  derived through the tokenizer, limits from `config.json`'s `kev` block
+  (8192 state / 8192 branch tokens, 255 options);
+- caller text is escaped (`<|name|>` → `<¦name¦>`) so it can never forge a
+  delimiter;
+- choice questions accept `criteria` as `{label: description}`, rendered as
+  `label: description`; noul defaults to `no` / `yes`.
+
+The `KEV_VARIANTS` map (`"0.6b"`, `"4b"`) carries each size's pinned revision
+and download size. Lower-level helpers are exported for custom runtimes:
+`escapeKevText`, `packKevSequence`.
 
 ## Worker / thread
 

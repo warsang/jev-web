@@ -90,6 +90,16 @@ export {
   DECISION2_NOUL_DESCRIPTIONS,
 } from "./decision2.mjs";
 export {
+  createKevDecider,
+  escapeKevText,
+  packKevSequence,
+  KEV_DEFAULT_MODEL,
+  KEV_DEFAULT_REVISION,
+  KEV_4B_MODEL,
+  KEV_4B_REVISION,
+  KEV_VARIANTS,
+} from "./kev.mjs";
+export {
   DEFAULT_MODEL,
   DEFAULT_REVISION,
   DEFAULT_TEMPERATURE,

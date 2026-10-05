@@ -44,6 +44,11 @@ import {
   DECISION2_DEFAULT_MODEL,
   DECISION2_DEFAULT_REVISION,
 } from "./decision2.mjs";
+import {
+  createKevDecider,
+  KEV_DEFAULT_MODEL,
+  KEV_DEFAULT_REVISION,
+} from "./kev.mjs";
 
 const families = new Map();
 
@@ -106,6 +111,14 @@ registerDecisionFamily("decision2", {
     revision: DECISION2_DEFAULT_REVISION,
   },
   create: createDecision2Decider,
+});
+
+registerDecisionFamily("kev", {
+  defaults: {
+    model: KEV_DEFAULT_MODEL,
+    revision: KEV_DEFAULT_REVISION,
+  },
+  create: createKevDecider,
 });
 
 /**
