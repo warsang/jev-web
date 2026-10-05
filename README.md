@@ -496,6 +496,27 @@ import { createDecider } from "jev-web";
 - Accuracy is domain-bound: questions and states unlike the model's training
   domain are out of distribution. Measure before relying on any answer.
 - English, 512-token sequence (state capped), one state per forward pass.
+- **WebGPU support is uneven.** A `navigator.gpu` adapter existing is not
+  evidence that inference will run: onnxruntime-web compiles WGSL per subgraph,
+  and Firefox currently rejects the reference DeBERTa-v3 export's `Clip`
+  subgraph (`Failed to create a WebGPU compute pipeline: ShaderModule with
+  'Clip' label is invalid`, surfaced as `failed to call OrtRun()`). The live
+  demo detects that signature and rebuilds on WASM, which works but is much
+  slower. If you hit it in your own app, fall back explicitly rather than
+  trusting adapter detection:
+
+  ```js
+  let decider;
+  try {
+    decider = await createDecider({ device: "webgpu" });
+    await decider.decide("warmup", [{ type: "noul", instructions: "Ready?" }]);
+  } catch {
+    decider = await createDecider({ device: "wasm", dtype: "q4" });
+  }
+  ```
+
+  That warm-up call is the point: probe with **inference**, not with
+  `requestAdapter()`.
 
 ## License
 

@@ -353,7 +353,9 @@ async function run() {
         noteBrokenDevice(decider.info.device);
         setNotice(
           `WebGPU could not run this model in your browser (${shortErr(err)}). ` +
-          `Rebuilt on WASM — slower, still entirely on-device.`,
+          `Rebuilt on WASM — still entirely on-device, but expect the first answer ` +
+          `to take tens of seconds. This page is served without COOP/COEP, so the ` +
+          `ONNX runtime cannot use threads here.`,
         );
         $("typed-when").textContent = "WebGPU failed — rebuilding on WASM…";
         $("typed-when").className = "pill warn";
@@ -469,7 +471,8 @@ async function load() {
         noteBrokenDevice(wanted);
         setNotice(
           `WebGPU failed on this browser while loading the model (${shortErr(err)}). ` +
-          `Retrying on WASM — slower, still entirely on-device.`,
+          `Retrying on WASM — slower (tens of seconds per answer here, because this ` +
+          `page cannot enable COOP/COEP for threads), still entirely on-device.`,
         );
         decider?.dispose?.();
         decider = null;
