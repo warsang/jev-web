@@ -28,6 +28,28 @@ export const BEKKO_68M_REVISION = "ab7685f23e5edbc1acb12ced4f2c4e12591efa69";
 export const BEKKO_400M_MODEL = "hotchpotch/bekko-system-one-v0-400m";
 export const BEKKO_400M_REVISION = "1960df5602bd93cc8d336fdebd9fb68a30926e13";
 
+/** Named size variants with their pinned revisions and download sizes. */
+export const BEKKO_VARIANTS = {
+  "17m": {
+    model: BEKKO_DEFAULT_MODEL,
+    revision: BEKKO_DEFAULT_REVISION,
+    bytes: 29_000_000,
+    description: "17m, 29 MB browser ONNX",
+  },
+  "68m": {
+    model: BEKKO_68M_MODEL,
+    revision: BEKKO_68M_REVISION,
+    bytes: 196_342_909,
+    description: "68m, 196 MB browser ONNX",
+  },
+  "400m": {
+    model: BEKKO_400M_MODEL,
+    revision: BEKKO_400M_REVISION,
+    bytes: 1_426_199_724,
+    description: "400m, 1.43 GB browser ONNX",
+  },
+};
+
 // Candidate batching heuristic from the reference runtime: bound the
 // candidate-attention growth per forward; not a total RAM limit.
 export const BEKKO_ATTENTION_BUDGET = 1_048_576;
@@ -252,6 +274,7 @@ const hfUrl = (model, revision, ...parts) =>
 export async function createBekkoDecider({
   model = BEKKO_DEFAULT_MODEL,
   revision = BEKKO_DEFAULT_REVISION,
+  variant = null,
   subdir = BEKKO_DEFAULT_SUBDIR,
   manifestUrl = null,
   modelUrl = null,
@@ -268,6 +291,13 @@ export async function createBekkoDecider({
   attentionBudget = BEKKO_ATTENTION_BUDGET,
   scope = globalThis,
 } = {}) {
+  // Named size shortcut: {variant: "400m"} sets model/revision.
+  if (variant) {
+    const v = BEKKO_VARIANTS[variant];
+    if (!v) throw new TypeError(`bekko: unknown variant "${variant}" (17m, 68m, 400m)`);
+    model = v.model;
+    revision = v.revision;
+  }
   const ortMod = ort ?? (await import("onnxruntime-web"));
   const tf = transformers ?? (await import("@huggingface/transformers"));
   if (wasmPaths) {

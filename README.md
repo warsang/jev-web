@@ -345,6 +345,9 @@ const decider = await createBekkoDecider({
   // onnx_browser/ (29 MB)
   onProgress: (p) => console.log(p.phase, p.loaded, p.total),
 });
+// or pick a larger sibling:
+// await createBekkoDecider({ variant: "68m" });  // 196 MB
+// await createBekkoDecider({ variant: "400m" }); // 1.43 GB, #2 on the S1MB leaderboard
 const { answers } = await decider.decide(stateText, questions);
 ```
 
@@ -358,9 +361,11 @@ Protocol implemented here (mirrors the reference browser runtime,
 - score levels map to numeric candidate values `0..n-1`; the answer is the
   expected value plus the argmax level and a normalised score.
 
-Larger siblings are available via the exported model/revision constants:
-`BEKKO_68M_MODEL` / `BEKKO_68M_REVISION` and `BEKKO_400M_MODEL` /
-`BEKKO_400M_REVISION` (68M and 400M, same `onnx_browser/` layout).
+Larger siblings are available via the `variant` option (`"17m"`, `"68m"`,
+`"400m"`) or the exported model/revision constants: `BEKKO_68M_MODEL` /
+`BEKKO_68M_REVISION` and `BEKKO_400M_MODEL` / `BEKKO_400M_REVISION` (same
+`onnx_browser/` layout). The `BEKKO_VARIANTS` map carries each size's pinned
+revision and download size.
 
 Lower-level helpers are exported for custom runtimes:
 `renderBekkoContent`, `renderBekkoRequest`, `tokenizeBekkoRequest`,

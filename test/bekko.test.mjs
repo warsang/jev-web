@@ -17,6 +17,8 @@ import {
   createBekkoDecider,
   BEKKO_DEFAULT_MODEL,
   BEKKO_DEFAULT_REVISION,
+  BEKKO_400M_MODEL,
+  BEKKO_VARIANTS,
   BEKKO_NOUL_DESCRIPTIONS,
 } from "../src/bekko.mjs";
 
@@ -219,6 +221,25 @@ test("createBekkoDecider wires manifest + session and decodes all three kinds", 
   assert.ok(answers[2].score < 0.1, "level 0 wins the rigged logits");
 
   await decider.dispose();
+});
+
+test("createBekkoDecider variant shortcut selects 68m/400m", async () => {
+  const decider = await createBekkoDecider({
+    variant: "400m",
+    ort: fakeOrt(),
+    transformers: fakeTransformers(),
+    fetchImpl: fakeFetch(MANIFEST),
+    device: "wasm",
+    sessionFactory: async (url, opts) => fakeOrt().InferenceSession.create(url, opts),
+  });
+  assert.equal(decider.info.model, BEKKO_400M_MODEL);
+  assert.equal(decider.info.revision, BEKKO_VARIANTS["400m"].revision);
+  await decider.dispose();
+
+  await assert.rejects(
+    createBekkoDecider({ variant: "nope", ort: fakeOrt() }),
+    /unknown variant/,
+  );
 });
 
 test("createBekkoDecider rejects bad questions before touching the network", async () => {
