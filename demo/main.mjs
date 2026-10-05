@@ -239,6 +239,38 @@ function flash(node) {
   node.classList.add("flash");
 }
 
+// ── WebGPU that exists but cannot run this model ────────────────────────
+//
+// navigator.gpu.requestAdapter() resolving is NOT evidence that WebGPU works.
+// onnxruntime-web's WebGPU backend generates WGSL per subgraph, and some
+// browsers reject it for particular models — Firefox currently fails on
+// DeBERTa-v3's "Clip" subgraph with
+//   "Failed to create a WebGPU compute pipeline: ShaderModule with 'Clip'
+//    label is invalid"
+// which surfaces as `failed to call OrtRun()`. The adapter is there; the
+// kernels are not. So the demo treats the *first inference* as the real probe
+// and falls back to WASM, which is slower but works everywhere.
+const WEBGPU_FAILURES = [
+  /failed to call OrtRun/i,
+  /WebGPU compute pipeline/i,
+  /ShaderModule/i,
+  /shader module/i,
+  /webgpu.*invalid/i,
+  /adapter.*lost|Navigator.*not.*support/i,
+];
+
+function isWebGpuFailure(err) {
+  const msg = String(err?.message ?? err ?? "");
+  return WEBGPU_FAILURES.some((re) => re.test(msg));
+}
+
+function setNotice(text, kind = "warn") {
+  const box = $("notice");
+  box.hidden = !text;
+  box.className = `notice ${kind}`;
+  box.textContent = text ?? "";
+}
+
 // ── rendering answers ──────────────────────────────────────────────────
 function answerHead(a) {
   const head = el("div", "ans-head");
@@ -310,7 +342,28 @@ async function run() {
   running = true;
   const warmBefore = net.warm;
   try {
-    const result = await decider.decide(state, qs);
+    let result;
+    try {
+      result = await decider.decide(state, qs);
+    } catch (err) {
+      // The common WebGPU failure happens here, not at load: the weights
+      // fetch fine, then the first OrtRun() cannot build a compute pipeline
+      // for one of the model's subgraphs. Rebuild on WASM and retry once.
+      if (decider.info.device !== "wasm" && isWebGpuFailure(err)) {
+        noteBrokenDevice(decider.info.device);
+        setNotice(
+          `WebGPU could not run this model in your browser (${shortErr(err)}). ` +
+          `Rebuilt on WASM — slower, still entirely on-device.`,
+        );
+        $("typed-when").textContent = "WebGPU failed — rebuilding on WASM…";
+        $("typed-when").className = "pill warn";
+        decider.dispose?.();
+        decider = await buildDecider("wasm", "auto");
+        result = await decider.decide(state, qs);
+      } else {
+        throw err;
+      }
+    }
     renderTyped(result, qs);
 
     const ms = result.timings?.totalMs ?? 0;
@@ -369,6 +422,30 @@ function fmtBytes(n) {
   return mb > 1000 ? `${(mb / 1000).toFixed(2)} GB` : `${mb.toFixed(0)} MB`;
 }
 
+// Remember a device that failed, so a reload does not re-download and
+// re-crash before falling back again.
+const BROKEN_DEVICE_KEY = "jev-web.brokenDevice";
+const noteBrokenDevice = (d) => { try { sessionStorage.setItem(BROKEN_DEVICE_KEY, d); } catch { /* private mode */ } };
+const readBrokenDevice = () => { try { return sessionStorage.getItem(BROKEN_DEVICE_KEY); } catch { return null; } };
+
+async function buildDecider(device, dtype) {
+  return createDecider({
+    model: DEFAULT_MODEL,
+    revision: DEFAULT_REVISION,
+    device,
+    dtype,
+    onProgress: (p) => {
+      const pct = Number.isFinite(p.progress) ? Math.round(p.progress) : null;
+      const meta = $("progress-meta");
+      meta.textContent = `[${p.phase}] ${p.status ?? ""} ${p.file ?? ""} ${
+        p.total ? `${fmtBytes(p.loaded)} / ${fmtBytes(p.total)}` : fmtBytes(p.loaded)
+      } ${pct != null ? `${pct}%` : ""}`.trim();
+      // nested data files report their own progress; take the max
+      if (pct != null) $("progress-fill").style.width = `${pct}%`;
+    },
+  });
+}
+
 async function load() {
   if (loading || decider) return;
   loading = true;
@@ -378,22 +455,30 @@ async function load() {
   $("progress").hidden = false;
   const t0 = performance.now();
 
+  let wanted = $("device").value;
+  // A device that already failed this session never gets chosen again.
+  if (wanted === "auto" && readBrokenDevice()) wanted = "wasm";
+
   try {
-    decider = await createDecider({
-      model: DEFAULT_MODEL,
-      revision: DEFAULT_REVISION,
-      device: $("device").value,
-      dtype: $("dtype").value,
-      onProgress: (p) => {
-        const pct = Number.isFinite(p.progress) ? Math.round(p.progress) : null;
-        const meta = $("progress-meta");
-        meta.textContent = `[${p.phase}] ${p.status ?? ""} ${p.file ?? ""} ${
-          p.total ? `${fmtBytes(p.loaded)} / ${fmtBytes(p.total)}` : fmtBytes(p.loaded)
-        } ${pct != null ? `${pct}%` : ""}`.trim();
-        // nested data files report their own progress; take the max
-        if (pct != null) $("progress-fill").style.width = `${pct}%`;
-      },
-    });
+    try {
+      decider = await buildDecider(wanted, $("dtype").value);
+    } catch (err) {
+      // The model itself may fail to load on WebGPU. Rebuild on WASM rather
+      // than showing a dead page.
+      if (wanted !== "wasm" && isWebGpuFailure(err)) {
+        noteBrokenDevice(wanted);
+        setNotice(
+          `WebGPU failed on this browser while loading the model (${shortErr(err)}). ` +
+          `Retrying on WASM — slower, still entirely on-device.`,
+        );
+        decider?.dispose?.();
+        decider = null;
+        $("progress-meta").textContent = "WebGPU unavailable, retrying on WASM…";
+        decider = await buildDecider("wasm", $("dtype").value === "auto" ? "auto" : $("dtype").value);
+      } else {
+        throw err;
+      }
+    }
     $("progress-fill").style.width = "100%";
     const secs = ((performance.now() - t0) / 1000).toFixed(1);
     const i = decider.info;
@@ -402,6 +487,9 @@ async function load() {
     $("info").textContent =
       `Loaded in ${secs}s — ${i.model}@${(i.revision ?? "main").slice(0, 8)} · ${i.device}/${i.dtype} · ` +
       `temperature ${i.temperature} (${i.configSource}). Cached by the browser: reloads and offline visits are instant.`;
+    if (i.device === "wasm" && !readBrokenDevice()) {
+      setNotice("Running on WASM (CPU) — no usable WebGPU here, so expect higher latency.");
+    }
     $("run").disabled = false;
     $("load").textContent = "Model loaded ✓";
     $("load").disabled = true;
@@ -417,6 +505,12 @@ async function load() {
   }
 }
 
+function shortErr(err) {
+  const m = String(err?.message ?? err ?? "");
+  const line = m.split("\n").find((l) => /shader|pipeline|OrtRun|webgpu/i.test(l)) ?? m;
+  return line.replace(/\s+/g, " ").trim().slice(0, 180) || m.slice(0, 180);
+}
+
 $("load").onclick = load;
 $("run").onclick = run;
 $("device").onchange = () => { if (decider) { decider = null; $("load").disabled = false; $("load").textContent = "Load model"; $("model-state").textContent = "settings changed — reload"; } };
@@ -427,13 +521,19 @@ $("dtype").onchange = $("device").onchange;
   renderQuestions();
   loadPreset(readUrlState());
 
-  // Report the resolved backend before anyone spends 300 MB finding out.
+  // Report the resolved backend before anyone spends 340 MB finding out.
   // Statically imported on purpose: a dynamic import of a module that is also
   // statically imported makes Rollup emit a broken interop wrapper, and the
   // failure is a silent unhandled rejection rather than a build error.
   const gpu = await detectWebGPU();
   const dev = resolveDevice({ device: "auto", webgpu: gpu });
-  $("info").textContent = gpu
-    ? `WebGPU available — will load ${resolveDtype(dev, "auto")} on ${dev}.`
+  const broken = readBrokenDevice();
+  if (broken) {
+    setNotice(`This browser already failed on ${broken}. Loading on WASM instead — you can retry WebGPU by clearing the "device" selector.`);
+  }
+  $("info").textContent = gpu && !broken
+    ? `WebGPU detected — will load ${resolveDtype(dev, "auto")} on ${dev}. ` +
+      `If the first run fails, this page falls back to WASM automatically.`
+    : "No WebGPU here — will load q4 on WASM (slower, still fully local).";
     : "No WebGPU here — will load q4 on single-threaded WASM (slower, still fully local).";
 })();

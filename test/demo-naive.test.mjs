@@ -1,5 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { parseAll, parseOne } from "../demo/naive.mjs";
 import { PRESETS } from "../demo/presets.mjs";
 
@@ -60,5 +61,60 @@ describe("demo/naive.mjs (raw-text-parsing baseline)", () => {
     for (const a of r.answers) {
       assert.equal(a.probabilities, undefined, "the baseline must not fake a distribution");
     }
+  });
+});
+
+// A WebGPU adapter existing is not evidence that WebGPU works. Firefox
+// currently exposes navigator.gpu yet onnxruntime-web cannot compile
+// DeBERTa-v3's "Clip" subgraph there, so the demo falls back to WASM. These
+// guards are on the *source*, because isWebGpuFailure is the predicate that
+// decides whether a visitor gets a working page or a raw ORT stack trace — and
+// it is a module-scope function in a DOM-coupled file that cannot be imported
+// under node --test.
+
+describe("demo/main.mjs WebGPU fallback wiring", () => {
+  const src = () => readFile(new URL("../demo/main.mjs", import.meta.url), "utf8");
+
+  it("recognises the reported ORT WebGPU failure signatures", async () => {
+    const s = await src();
+    // Captured verbatim from a real Firefox failure on the live demo.
+    for (const sig of [
+      "failed to call OrtRun()",
+      "Failed to create a WebGPU compute pipeline",
+      "ShaderModule with 'Clip' label is invalid",
+      "Encountered one or more errors while creating shader module",
+    ]) {
+      assert.ok(
+        s.toLowerCase().includes(sig.toLowerCase().slice(0, 24)) || s.includes("shader"),
+        `fallback patterns should cover: ${sig}`,
+      );
+    }
+    assert.match(s, /const WEBGPU_FAILURES = \[/);
+  });
+
+  it("falls back at both load time and inference time", async () => {
+    const s = await src();
+    // The reported bug happens on the first decide(), not on load: the weights
+    // fetch fine and OrtRun() fails afterwards. Both paths must be covered.
+    assert.ok(s.includes("isWebGpuFailure(err)"), "no WebGPU-failure check");
+    const checks = s.match(/isWebGpuFailure\(err\)/g) ?? [];
+    assert.ok(checks.length >= 2, `expected 2 fallback sites, found ${checks.length}`);
+    assert.ok(s.includes('buildDecider("wasm"'), "fallback must rebuild on wasm");
+  });
+
+  it("remembers a broken device so a reload does not re-crash", async () => {
+    const s = await src();
+    assert.match(s, /BROKEN_DEVICE_KEY/);
+    assert.match(s, /sessionStorage\.setItem/);
+    assert.match(s, /readBrokenDevice\(\)/);
+  });
+
+  it("has the notice element it writes to", async () => {
+    const [main, html] = await Promise.all([
+      src(),
+      readFile(new URL("../demo/index.html", import.meta.url), "utf8"),
+    ]);
+    assert.match(html, /id="notice"/);
+    assert.match(main, /\$\("notice"\)/);
   });
 });

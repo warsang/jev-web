@@ -191,6 +191,17 @@ select { padding: 9px 10px; font-size: 12px; }
 .progress-meta { font: 11px var(--mono); color: var(--fg-faint); margin-top: 6px; }
 .note { font-size: 12.5px; color: var(--fg-faint); margin: 12px 0 0; }
 .note b { color: var(--fg-dim); }
+.notice {
+  font: 12px/1.6 var(--mono); margin: 12px 0 0; padding: 9px 11px;
+  border-radius: 8px; border: 1px solid color-mix(in srgb, var(--warn) 35%, var(--line));
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+  color: var(--warn); overflow-wrap: anywhere;
+}
+.notice.good {
+  border-color: color-mix(in srgb, var(--accent) 35%, var(--line));
+  background: color-mix(in srgb, var(--accent) 10%, transparent);
+  color: var(--accent);
+}
 .error {
   font: 12px/1.6 var(--mono); color: var(--bad); margin: 10px 0 0;
   background: color-mix(in srgb, var(--bad) 10%, transparent);
