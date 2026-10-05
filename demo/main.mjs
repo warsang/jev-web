@@ -535,5 +535,4 @@ $("dtype").onchange = $("device").onchange;
     ? `WebGPU detected — will load ${resolveDtype(dev, "auto")} on ${dev}. ` +
       `If the first run fails, this page falls back to WASM automatically.`
     : "No WebGPU here — will load q4 on WASM (slower, still fully local).";
-    : "No WebGPU here — will load q4 on single-threaded WASM (slower, still fully local).";
 })();
