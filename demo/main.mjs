@@ -264,6 +264,28 @@ function isWebGpuFailure(err) {
   return WEBGPU_FAILURES.some((re) => re.test(msg));
 }
 
+// The runtime could not build a graph at all: a quantized op the active build
+// has no kernel for. The reference export's q4 variant embeds its word
+// embeddings as GatherBlockQuantized, a contrib op that some ORT wasm builds
+// ship without — so q4 can be fine on WebGPU and fail on WASM with
+// "Could not find an implementation for GatherBlockQuantized(1) node".
+const UNSUPPORTED_OP = [
+  /Could not find an implementation for (\w+)/i,
+  /not implemented/i,
+  /ERROR_CODE: 9/,
+  /Can't create a session/i,
+];
+
+function isUnsupportedOp(err) {
+  const msg = String(err?.message ?? err ?? "");
+  return UNSUPPORTED_OP.some((re) => re.test(msg));
+}
+
+function opName(err) {
+  return String(err?.message ?? err ?? "")
+    .match(/implementation for (\w+)/i)?.[1] ?? "an op";
+}
+
 function setNotice(text, kind = "warn") {
   const box = $("notice");
   box.hidden = !text;
@@ -360,7 +382,14 @@ async function run() {
         $("typed-when").textContent = "WebGPU failed — rebuilding on WASM…";
         $("typed-when").className = "pill warn";
         decider.dispose?.();
-        decider = await buildDecider("wasm", "auto");
+        const built = await buildDeciderResilient("wasm", WASM_DTYPE_LADDER, (dtype, op) => {
+          setNotice(
+            `This browser's ONNX runtime cannot execute ${op}, which the q4 weights need. ` +
+            `Retrying with ${dtype} — a bigger download, but it will run.`,
+          );
+        });
+        decider = built.decider;
+        refreshInfoLine();
         result = await decider.decide(state, qs);
       } else {
         throw err;
@@ -448,6 +477,26 @@ async function buildDecider(device, dtype) {
   });
 }
 
+// Only fp32/fp16/q4/q4f16 exist for the reference export — there is no q8 —
+// so a WASM fallback that lands on a dtype the active ORT build cannot execute
+// must escalate rather than give up. Smallest first: q4 is 477 MB and fp32 is
+// 1065 MB, so the expensive download is a last resort, not the default.
+const WASM_DTYPE_LADDER = ["q4", "fp32"];
+
+async function buildDeciderResilient(device, dtypes, onRetry) {
+  let lastErr;
+  for (const dtype of dtypes) {
+    try {
+      return { decider: await buildDecider(device, dtype), dtype };
+    } catch (err) {
+      if (!isUnsupportedOp(err)) throw err;
+      lastErr = err;
+      onRetry?.(dtype, opName(err));
+    }
+  }
+  throw lastErr;
+}
+
 async function load() {
   if (loading || decider) return;
   loading = true;
@@ -477,19 +526,24 @@ async function load() {
         decider?.dispose?.();
         decider = null;
         $("progress-meta").textContent = "WebGPU unavailable, retrying on WASM…";
-        decider = await buildDecider("wasm", $("dtype").value === "auto" ? "auto" : $("dtype").value);
+        const built = await buildDeciderResilient("wasm", WASM_DTYPE_LADDER, (dtype, op) => {
+          $("progress-meta").textContent = `this ORT build has no ${op} kernel — retrying with ${dtype}…`;
+          setNotice(
+            `This browser's ONNX runtime cannot execute ${op}, which the ${dtype} weights need. ` +
+            `Retrying with a larger dtype — expect a bigger download.`,
+          );
+        });
+        decider = built.decider;
       } else {
         throw err;
       }
     }
     $("progress-fill").style.width = "100%";
-    const secs = ((performance.now() - t0) / 1000).toFixed(1);
+    loadedSecs = ((performance.now() - t0) / 1000).toFixed(1);
     const i = decider.info;
     $("model-state").textContent = "model ready";
     $("model-state").className = "pill good";
-    $("info").textContent =
-      `Loaded in ${secs}s — ${i.model}@${(i.revision ?? "main").slice(0, 8)} · ${i.device}/${i.dtype} · ` +
-      `temperature ${i.temperature} (${i.configSource}). Cached by the browser: reloads and offline visits are instant.`;
+    refreshInfoLine();
     if (i.device === "wasm" && !readBrokenDevice()) {
       setNotice("Running on WASM (CPU) — no usable WebGPU here, so expect higher latency.");
     }
@@ -506,6 +560,20 @@ async function load() {
   } finally {
     loading = false;
   }
+}
+
+// The info line is written once at load, so after an inference-time fallback
+// it still advertised the old backend ("webgpu/q4f16") while inference ran on
+// WASM. Keep it truthful by rewriting it from the live decider.
+let loadedSecs = null;
+
+function refreshInfoLine() {
+  if (!decider) return;
+  const i = decider.info;
+  $("info").textContent =
+    `Loaded in ${loadedSecs ?? "—"}s — ${i.model}@${(i.revision ?? "main").slice(0, 8)} · ` +
+    `${i.device}/${i.dtype} · temperature ${i.temperature} (${i.configSource}). ` +
+    `Cached by the browser: reloads and offline visits are instant.`;
 }
 
 function shortErr(err) {

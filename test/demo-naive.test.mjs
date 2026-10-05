@@ -99,7 +99,39 @@ describe("demo/main.mjs WebGPU fallback wiring", () => {
     assert.ok(s.includes("isWebGpuFailure(err)"), "no WebGPU-failure check");
     const checks = s.match(/isWebGpuFailure\(err\)/g) ?? [];
     assert.ok(checks.length >= 2, `expected 2 fallback sites, found ${checks.length}`);
-    assert.ok(s.includes('buildDecider("wasm"'), "fallback must rebuild on wasm");
+    // Both sites rebuild via the resilient builder, not buildDecider directly.
+    assert.ok(s.includes('buildDeciderResilient("wasm"'), "fallback must rebuild on wasm");
+    const resilient = s.match(/buildDeciderResilient\("wasm"/g) ?? [];
+    assert.ok(resilient.length >= 2, `expected 2 wasm rebuilds, found ${resilient.length}`);
+  });
+
+  it("escalates past a dtype the ORT build cannot execute", async () => {
+    const s = await src();
+    // Regression: the fallback rebuilt with dtype "auto", which resolves to q4
+    // on WASM, and q4's GatherBlockQuantized has no kernel in some ORT wasm
+    // builds -> "Could not find an implementation for GatherBlockQuantized(1)".
+    // The fallback then failed even though a working dtype existed.
+    assert.match(s, /isUnsupportedOp\(err\)/, "no unsupported-op detection");
+    assert.match(
+      s,
+      /const UNSUPPORTED_OP = \[/,
+      "must classify missing-kernel errors separately from WebGPU failures",
+    );
+    assert.match(s, /WASM_DTYPE_LADDER = \["q4", "fp32"\]/, "dtype ladder must escalate");
+    // The ladder must not contain q8: the reference export has no q8 variant,
+    // so trying it would 404 on the weight file.
+    assert.doesNotMatch(s, /WASM_DTYPE_LADDER = \[[^\]]*"q8"/);
+  });
+
+  it("rewrites the info line after a backend change", async () => {
+    const s = await src();
+    // The line is written once at load, so after an inference-time fallback it
+    // still claimed "webgpu/q4f16" while inference actually ran on WASM.
+    assert.match(s, /function refreshInfoLine\(\)/);
+    assert.ok(
+      (s.match(/refreshInfoLine\(\)/g) ?? []).length >= 3,
+      "info line must be refreshed on load and after each fallback",
+    );
   });
 
   it("remembers a broken device so a reload does not re-crash", async () => {
