@@ -1,6 +1,6 @@
 {
   "name": "jev-web",
-  "version": "0.7.1",
+  "version": "0.7.2",
   "description": "Run open-jev-, Laya- and Strands-Decider-shaped typed-decision models in the browser: one state plus typed questions in, calibrated probabilities out.",
   "type": "module",
   "license": "MIT",
