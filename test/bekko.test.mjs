@@ -178,13 +178,19 @@ function fakeTransformers() {
   const tok = (text) => ({
     input_ids: { data: fakeEncode(text) },
   });
-  return { AutoTokenizer: { from_pretrained: async () => tok } };
+  return {
+    AutoTokenizer: { from_pretrained: async () => tok },
+    PreTrainedTokenizer: function () { return tok; },
+  };
 }
 
 function fakeFetch(manifest) {
   return async (url) => {
     if (String(url).endsWith("manifest.json")) {
       return { ok: true, json: async () => manifest };
+    }
+    if (String(url).endsWith("tokenizer.json")) {
+      return { ok: true, json: async () => ({}) };
     }
     throw new Error(`unexpected fetch ${url}`);
   };

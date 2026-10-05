@@ -319,10 +319,29 @@ export async function createBekkoDecider({
   const manifest = await manifestRes.json();
   const taskColumns = manifest.tasks;
 
-  const tok = await tf.AutoTokenizer.from_pretrained(tokenizerModel ?? model, {
-    revision: tokenizerRevision ?? (tokenizerModel ? undefined : revision),
-    progress_callback: report("tokenizer"),
-  });
+  /**
+   * Load the tokenizer. The bekko repos keep tokenizer.json under
+   * onnx_browser/, not the repo root, so AutoTokenizer.from_pretrained(repo)
+   * finds nothing there. Load the subdir's tokenizer.json directly and
+   * construct the base tokenizer (special tokens come from the manifest).
+   * An explicit tokenizerModel still goes through from_pretrained.
+   */
+  async function loadBekkoTokenizer() {
+    if (tokenizerModel) {
+      return tf.AutoTokenizer.from_pretrained(tokenizerModel, {
+        revision: tokenizerRevision,
+        progress_callback: report("tokenizer"),
+      });
+    }
+    const tokRes = await fetchImpl(hfUrl(model, revision, subdir, "tokenizer.json"));
+    if (!tokRes.ok) {
+      throw new Error(`bekko: tokenizer fetch failed (${tokRes.status})`);
+    }
+    report("tokenizer")({ file: "tokenizer.json" });
+    return new tf.PreTrainedTokenizer(await tokRes.json(), {});
+  }
+
+  const tok = await loadBekkoTokenizer();
   const encode = (text) =>
     Array.from(tok(text, { add_special_tokens: false }).input_ids.data, Number);
 
