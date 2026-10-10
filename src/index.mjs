@@ -103,6 +103,27 @@ export {
   KEV_VARIANTS,
 } from "./kev.mjs";
 export {
+  createVegaDecider,
+  buildVegaPrompt,
+  packVegaBatch,
+  packVegaChunks,
+  vegaQuestionDef,
+  vegaOptionTexts,
+  vegaThermalFeatures,
+  vegaThermalProbabilities,
+  vegaAnswers,
+  vegaOptionLabels,
+  renderVegaText,
+  VEGA_DEFAULT_MODEL,
+  VEGA_DEFAULT_REVISION,
+  VEGA_TORSO_FILE,
+  VEGA_ENGINE_FILE,
+  VEGA_QTYPE,
+  VEGA_QTYPE_NAMES,
+  VEGA_DEFAULTS,
+  VEGA_DEFAULT_THETA,
+} from "./vega.mjs";
+export {
   DEFAULT_MODEL,
   DEFAULT_REVISION,
   DEFAULT_TEMPERATURE,

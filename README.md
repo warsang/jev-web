@@ -226,7 +226,7 @@ tries the requested family and then any fallbacks, returning the shared contract
 ```js
 import { createDecisionRuntime, listDecisionFamilies } from "jev-web";
 
-listDecisionFamilies(); // ["open-jev", "laya", "strands-decider", "bekko", "decision2", "kev"]
+listDecisionFamilies(); // ["open-jev", "laya", "strands-decider", "bekko", "decision2", "kev", "vega"]
 const runtime = await createDecisionRuntime({
   family: "strands-decider",
   fallback: ["laya", "open-jev"],
@@ -483,6 +483,61 @@ Protocol implemented here (mirrors the reference JS in the model README):
 The `KEV_VARIANTS` map (`"0.6b"`, `"4b"`) carries each size's pinned revision
 and download size. Lower-level helpers are exported for custom runtimes:
 `escapeKevText`, `packKevSequence`.
+
+## Vega family (frozen Qwen3.5 backbone + latent decision-physics engine)
+
+`createVegaDecider(options)` runs [Vega 0.8B](https://huggingface.co/nandakishorm/vega-08b-public-intents)
+(by the Laya author): the language model is frozen and never trained — a 0.8B
+Qwen3.5 torso is read once (layers 13 and 19, span means pooled in-graph) and
+a 14M-parameter physics engine on top does the deciding. Each question drops a
+particle into a latent space whose landscape holds one Gaussian well per
+option; a damped symplectic integrator with a selective-SSM thermostat runs
+up to 12 steps (settled particles freeze), and the Boltzmann occupancy of the
+wells is the answer distribution:
+
+```js
+import { createVegaDecider } from "jev-web";
+
+const decider = await createVegaDecider({
+  // defaults to warsang/vega-08b-web @ pinned revision
+  onProgress: (p) => console.log(p.phase, p.loaded, p.total),
+});
+const { answers } = await decider.decide(stateText, questions);
+```
+
+Protocol implemented here (mirrors the reference `vega_common.py` / `vega_api.py`):
+
+- prompt `[BOS] Observation:\n<state>\n\nMeasurement (choice|score|boolean): <instructions>\nPossible outcomes:\n* <option> …\nOutcome:` — the state comes first so its span never sees the question
+  (causal attention), and short states get a query-first prefix so the frozen
+  model reads knowing what is asked;
+- two ONNX graphs: the frozen torso emits per-segment span means for the
+  state/question/final-token slots, every option, and 16 equal state chunks
+  (the engine's memory reader) from the one causal read; the engine graph
+  (unrolled integrator; the settle-freeze math is identical to the
+  reference's early exit) emits raw logits plus the particle physics;
+- calibration is **thermal and checkpoint-driven**: `vega_config.json`'s
+  `calibration.theta` maps the particle's physical state (residual kinetic
+  energy, distance to the nearest well, steps used, option count) to a
+  temperature per question type; `decider.info.calibrationSource` names the
+  file used;
+- answers carry the full distribution plus Vega's reliability machinery:
+  a split-conformal `predictionSet`, an `abstain` flag at the chosen risk
+  (`alpha` conformal level, `risk` abstention level, both per question type),
+  an `unbound` out-of-distribution flag (particle ended far from every
+  well), `settleSteps`, and the final `energy`;
+- jev-web's `noul` maps to Vega's `boolean` (fixed `no` / `yes` slots);
+  `choice` accepts `criteria` as `{label: description}`, and `score` uses the
+  option texts as levels.
+
+Caveats: the checkpoint's gated task adapters are not shipped in v1 — the
+runtime uses the base engine, which is the source repo's default; and the
+prompt window is the trained 73,728 tokens, so pass `maxLen` to cap a
+browser's read.
+
+Lower-level helpers are exported for custom runtimes:
+`buildVegaPrompt`, `packVegaBatch`, `packVegaChunks`, `vegaQuestionDef`,
+`vegaOptionTexts`, `vegaThermalFeatures`, `vegaThermalProbabilities`,
+`vegaAnswers`, `vegaOptionLabels`.
 
 ## Worker / thread
 
