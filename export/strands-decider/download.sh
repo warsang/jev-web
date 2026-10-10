@@ -9,6 +9,7 @@ set -e
 OUT=~/workspace/strands-export
 mkdir -p "$OUT/base" "$OUT/ckpt"
 
+PYTHON_BIN=${PYTHON_BIN:-python3}
 BASE_MODEL=${BASE_MODEL:-Qwen/Qwen3.5-2B-Base}
 CKPT_MODEL=${CKPT_MODEL:-StrandsAgents/strands-decider-2B-hobson-v19}
 BASE_REV=${BASE_REV:-b1485b2fa6dfa1287294f269f5fb618e03d52d7c}
@@ -16,7 +17,7 @@ CKPT_REV=${CKPT_REV:-bb282d786bc251fd4e3068de3ada9ddbb38127cd}
 
 echo "== base model file list =="
 curl -s "https://huggingface.co/api/models/$BASE_MODEL/revision/$BASE_REV" |
-  python3 -c "
+  "$PYTHON_BIN" -c "
 import json,sys
 d=json.load(sys.stdin)
 for s in d.get('siblings',[]):
