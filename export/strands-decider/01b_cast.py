@@ -1,15 +1,16 @@
 """Stage 1b: stream-cast merged/torso_bf16.safetensors -> torso_fp16.safetensors.
 
-Avoids Module.to() on the live 1.88B-param model (killed twice, likely memory).
+Avoids Module.to() on the live multi-B-param model (killed twice, likely memory).
 Streams one tensor at a time: peak RAM ~1GB. bf16->fp16 keeps element size,
 so data_offsets are unchanged; only the dtype tag flips BF16->F16.
 """
 import json
+import os
 import struct
 import torch
 from safetensors import safe_open
 
-OUT = "/home/hatch/workspace/strands-export"
+OUT = os.environ.get("STRANDS_OUT", os.path.expanduser("~/workspace/strands-export"))
 SRC = f"{OUT}/merged/torso_bf16.safetensors"
 DST = f"{OUT}/merged/torso_fp16.safetensors"
 

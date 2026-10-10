@@ -25,6 +25,16 @@ def main():
         parity_quant = json.load(fh)
     with open(f"{OUT}/merged/hidden_size.json") as fh:
         hidden = json.load(fh)
+    meta = dict(hidden)  # carries torso_family + ckpt_config from stage 1
+
+    # Ship the checkpoint calibration verbatim: jev-web's strands.mjs reads
+    # strands_decider_config.json (or hobson_config.json on v19) from the
+    # model repo at load time and lets it override the pinned defaults.
+    ckpt_config = meta.get("ckpt_config") or {}
+    if ckpt_config:
+        with open(f"{FINAL}/strands_decider_config.json", "w") as fh:
+            json.dump(ckpt_config, fh, indent=2)
+        print("calibration config copied into final/", flush=True)
 
     files = {}
     for name in sorted(os.listdir(FINAL)):
@@ -37,24 +47,29 @@ def main():
         "model": "strands-decider-2b-web",
         "built_at": datetime.datetime.now(datetime.timezone.utc).isoformat(),
         "source": {
-            "base_model": "Qwen/Qwen3.5-2B-Base",
-            "base_revision": "b1485b2fa6dfa1287294f269f5fb618e03d52d7c",
-            "checkpoint": "StrandsAgents/strands-decider-2B-hobson-v19",
-            "checkpoint_revision": "bb282d786bc251fd4e3068de3ada9ddbb38127cd",
+            "base_model": os.environ.get("BASE_MODEL", "Qwen/Qwen3.5-2B-Base"),
+            "base_revision": meta.get("base_revision"),
+            "torso_family": meta.get("torso_family", "qwen3_5"),
+            "checkpoint": os.environ.get("CKPT_MODEL",
+                                         "StrandsAgents/strands-decider-2B-hobson-v19"),
+            "checkpoint_revision": os.environ.get("CKPT_REV"),
         },
         "pipeline": {
             "env": "torch CPU (download.pytorch.org), transformers>=5.0, peft, "
                    "safetensors, onnx, onnxruntime",
-            "merge": "Qwen3_5ForCausalLM.from_pretrained(text_config) -> .model, "
-                     "PeftModel.from_pretrained(lora) + merge_and_unload(), torso->fp16, head fp32",
+            "merge": f"{meta.get('torso_family', 'qwen3_5')} torso via "
+                     "torso_support.resolve_torso_class, LoRA merged "
+                     "as modeling.py::_load_torso, torso->fp16, head fp32",
             "export": "torch.onnx.dynamo_export wrapper "
-                      "(inputs input_ids/attention_mask/opt_idx int64; output logits fp32 [B,K])",
+                      "(inputs input_ids/attention_mask/answer_pos/option_pos "
+                      "int64; output logits fp32 [B,K])",
             "quantization": quant_choice,
         },
         "graph_contract": {
             "inputs": {"input_ids": "int64 [B, L] dynamic",
                        "attention_mask": "int64 [B, L] dynamic",
-                       "opt_idx": "int64 [B, K] dynamic, -1 padded"},
+                       "answer_pos": "int64 [B] dynamic (the <answer> token)",
+                       "option_pos": "int64 [B, K] dynamic, -1 padded"},
             "output": {"logits": "float32 [B, K], raw (no temperature/softmax)"},
             "hidden_size": hidden["hidden_size"],
             "pointer_dim": 256,
@@ -64,9 +79,12 @@ def main():
         "quantization_choice": quant_choice,
         "files": files,
         "notes": [
-            "LoRA merged into base exactly as modeling.py::_load_torso (qwen3_5).",
+            "LoRA merged into base exactly as modeling.py::_load_torso "
+            "(torso_support.py selects the family).",
             "PointerHead runs in fp32; torso in fp16.",
-            "No temperature or softmax in the graph; the JS consumer applies per-kind temperatures.",
+            "No temperature or softmax in the graph; the JS consumer applies the "
+            "per-kind temperatures from strands_decider_config.json, which is "
+            "copied into final/ so the browser export ships it.",
         ],
     }
     with open(f"{FINAL}/MANIFEST.json", "w") as fh:

@@ -2,8 +2,8 @@
  * registry.mjs — multi-family runtime for JEV-style typed-decision models.
  *
  * jev-web ships three families today — open-jev (fused DeBERTa graph), Laya
- * (ModernBERT encoder + typed head), Strands Decider 2B (Qwen torso + pointer
- * head), Bekko System One v0 (cross-encoder), and Decision 2.0 (Qwen3 +
+ * (ModernBERT encoder + typed head), Strands Decider 2B (Qwen3.5/Gemma4 torso
+ * + pointer head), Bekko System One v0 (cross-encoder), and Decision 2.0 (Qwen3 +
  * candidate head) — and any third party can add its own without touching
  * core:
  *

@@ -32,9 +32,9 @@ def run_parity(onnx_path, inputs):
     import onnxruntime as ort
     sess = ort.InferenceSession(onnx_path, providers=["CPUExecutionProvider"])
     outs = []
-    for name, ids, mask, opt, labels in inputs:
+    for name, ids, mask, ans, opt, labels in inputs:
         o = sess.run(None, {"input_ids": ids, "attention_mask": mask,
-                            "opt_idx": opt})[0][0]
+                            "answer_pos": ans, "option_pos": opt})[0][0]
         outs.append((name, o, labels))
     return outs
 

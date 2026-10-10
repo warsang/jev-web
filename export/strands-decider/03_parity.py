@@ -40,7 +40,11 @@ QUESTIONS = {
 
 
 def build_inputs(tokenizer):
-    """Return list of (name, input_ids[1,L], attention_mask[1,L], opt_idx[1,K], slot_labels)."""
+    """Return list of (name, input_ids[1,L], attention_mask[1,L], option_pos[1,K], slot_labels).
+
+    answer_pos is the prompt's last token (the `<answer>` marker, which
+    render_state+render_question always end with), matching the JS collate.
+    """
     out = []
     for sname, state in STATES.items():
         for qname, qfn in QUESTIONS.items():
@@ -50,7 +54,7 @@ def build_inputs(tokenizer):
             enc = tokenizer(text, return_offsets_mapping=True, add_special_tokens=False)
             ids = enc["input_ids"]
             offs = enc["offset_mapping"]
-            opt_idx = []
+            opt_pos = []
             for s, e in rq.option_spans:
                 last = -1
                 for j, (lo, hi) in enumerate(offs):
@@ -59,10 +63,11 @@ def build_inputs(tokenizer):
                     if lo >= s and hi <= e:
                         last = j
                 assert last >= 0, f"option span ({s},{e}) lost in {sname}/{qname}"
-                opt_idx.append(last)
+                opt_pos.append(last)
             out.append((f"{sname}/{qname}",
                         np.array([ids], np.int64), np.ones((1, len(ids)), np.int64),
-                        np.array([opt_idx], np.int64), rq.slot_labels))
+                        np.array([len(ids) - 1], np.int64),
+                        np.array([opt_pos], np.int64), rq.slot_labels))
     return out
 
 
@@ -79,13 +84,14 @@ def main():
         # the torch model (3.8GB) must not share the process with ORT.
         model = exp.load_export_model()
         refs = {}
-        for j, (name, ids, mask, opt, labels) in enumerate(items):
+        for j, (name, ids, mask, ans, opt, labels) in enumerate(items):
             with torch.no_grad():
                 t = model(torch.from_numpy(ids), torch.from_numpy(mask),
-                          torch.from_numpy(opt)).numpy()[0]
+                          torch.from_numpy(ans), torch.from_numpy(opt)).numpy()[0]
             refs[f"ref{j}"] = t
             refs[f"ids{j}"] = ids
             refs[f"mask{j}"] = mask
+            refs[f"ans{j}"] = ans
             refs[f"opt{j}"] = opt
             refs[f"name{j}"] = np.array(name)
             refs[f"labels{j}"] = np.array(labels)
@@ -104,11 +110,11 @@ def main():
         agree_all = True
         for j in range(n):
             name = str(z[f"name{j}"])
-            ids, mask, opt = z[f"ids{j}"], z[f"mask{j}"], z[f"opt{j}"]
+            ids, mask, ans, opt = z[f"ids{j}"], z[f"mask{j}"], z[f"ans{j}"], z[f"opt{j}"]
             t = z[f"ref{j}"]
             labels = list(z[f"labels{j}"])
             o = sess.run(None, {"input_ids": ids, "attention_mask": mask,
-                                "opt_idx": opt})[0][0]
+                                "answer_pos": ans, "option_pos": opt})[0][0]
             d = float(np.abs(t - o).max())
             worst = max(worst, d)
             at, ao = int(t.argmax()), int(o.argmax())

@@ -17,10 +17,13 @@ import {
   strandsChoiceConfidence,
   strandsScoreConfidence,
   createStrandsDecider,
+  parseStrandsCalibration,
+  loadStrandsCalibration,
   STRANDS_TEMPERATURE_BY_KIND,
   STRANDS_TEMPERATURE,
   STRANDS_ORDINAL_SMOOTHING,
   STRANDS_DEFAULT_MAX_LEN,
+  STRANDS_CONFIG_FILES,
 } from "../src/strands.mjs";
 import { softmaxWithTemperature } from "../src/answers.mjs";
 
@@ -329,6 +332,208 @@ test("createStrandsDecider wires tokenizer + session and decodes all three kinds
   assert.ok(prompts[0].startsWith("decoded:"));
   assert.ok(timings.totalMs >= 0 && timings.runMs >= 0);
   await decider.dispose();
+});
+
+// --------------------------------------------------------------------------
+// Checkpoint calibration config
+// --------------------------------------------------------------------------
+
+// StrandsAgents/strands-decider-E2B-gemma4-v1-2610's real config values.
+const E2B_CONFIG = {
+  base_model: "google/gemma-4-E2B-it",
+  head_type: "pointer",
+  max_length: 4096,
+  temperature: 0.7997762858861774,
+  temperature_by_kind: { noul: 1.0704394404346953, choice: 0.5608428296613732, score: 1.4788446944896205 },
+  ordinal_smoothing: 0.1,
+};
+
+test("parseStrandsCalibration overrides every field the checkpoint declares", () => {
+  const calibration = parseStrandsCalibration(E2B_CONFIG, {
+    temperature: STRANDS_TEMPERATURE,
+    temperaturesByKind: STRANDS_TEMPERATURE_BY_KIND,
+    ordinalSmoothing: STRANDS_ORDINAL_SMOOTHING,
+    maxLen: STRANDS_DEFAULT_MAX_LEN,
+  });
+  assert.equal(calibration.temperature, 0.7997762858861774);
+  assert.deepEqual(calibration.temperaturesByKind, E2B_CONFIG.temperature_by_kind);
+  assert.equal(calibration.ordinalSmoothing, 0.1);
+  assert.equal(calibration.maxLen, 4096);
+});
+
+test("parseStrandsCalibration falls back field-by-field on a partial config", () => {
+  const calibration = parseStrandsCalibration(
+    { temperature: 1.05 },
+    {
+      temperature: STRANDS_TEMPERATURE,
+      temperaturesByKind: { ...STRANDS_TEMPERATURE_BY_KIND },
+      ordinalSmoothing: 0.4,
+      maxLen: 2048,
+    },
+  );
+  assert.equal(calibration.temperature, 1.05, "declared field wins");
+  assert.deepEqual(calibration.temperaturesByKind, STRANDS_TEMPERATURE_BY_KIND, "undeclared kept");
+  assert.equal(calibration.ordinalSmoothing, 0.4);
+  assert.equal(calibration.maxLen, 2048);
+});
+
+test("parseStrandsCalibration rejects a non-pointer head and junk numbers", () => {
+  assert.throws(
+    () => parseStrandsCalibration({ head_type: "linear" }),
+    /head_type "linear".*pointer head/,
+  );
+  const calibration = parseStrandsCalibration(
+    { temperature: "hot", temperature_by_kind: { choice: -1, noul: "1.5" }, max_length: 7 },
+    { temperature: 2, temperaturesByKind: { choice: 3, noul: 3, score: 3 }, maxLen: 512 },
+  );
+  assert.equal(calibration.temperature, 2, "non-numeric temperature ignored");
+  assert.equal(calibration.temperaturesByKind.choice, 3, "non-positive temperature ignored");
+  assert.equal(calibration.temperaturesByKind.noul, 1.5, "numeric string accepted");
+  assert.equal(calibration.maxLen, 512, "absurd max_length ignored");
+});
+
+function configServer(files) {
+  const calls = [];
+  return {
+    calls,
+    fetchImpl: async (url) => {
+      calls.push(url);
+      const file = Object.keys(files).find((f) => String(url).endsWith(`/${f}`));
+      if (file === undefined) return { ok: false, status: 404, json: async () => ({}) };
+      const body = files[file];
+      return {
+        ok: true,
+        status: 200,
+        json: async () => (typeof body === "string" ? JSON.parse(body) : body),
+      };
+    },
+  };
+}
+
+test("loadStrandsCalibration reads strands_decider_config.json before hobson_config.json", async () => {
+  const server = configServer({
+    "strands_decider_config.json": E2B_CONFIG,
+    "hobson_config.json": { temperature: 0.1 },
+  });
+  const { calibration, source } = await loadStrandsCalibration({
+    model: "StrandsAgents/strands-decider-E2B-gemma4-v1-2610",
+    revision: "abc123",
+    fetchImpl: server.fetchImpl,
+  });
+  assert.equal(calibration.temperature, 0.7997762858861774);
+  assert.equal(source, "https://huggingface.co/StrandsAgents/strands-decider-E2B-gemma4-v1-2610/resolve/abc123/strands_decider_config.json");
+  assert.equal(server.calls.length, 1, "first hit wins");
+});
+
+test("loadStrandsCalibration falls back to the legacy filename then to pinned defaults", async () => {
+  const legacy = configServer({
+    "hobson_config.json": { temperature: 0.9627721607677362 },
+  });
+  const { calibration, source } = await loadStrandsCalibration({
+    model: "StrandsAgents/strands-decider-2B-hobson-v19",
+    fetchImpl: legacy.fetchImpl,
+  });
+  assert.equal(calibration.temperature, STRANDS_TEMPERATURE, "legacy file still parses");
+  assert.match(source, /hobson_config\.json$/);
+  assert.equal(legacy.calls.length, 2, "new name 404s first");
+
+  const none = configServer({});
+  const { calibration: pinned, source: noSource } = await loadStrandsCalibration({
+    model: "onnx-community/strands-decider-2B-hobson-v19-ONNX",
+    fetchImpl: none.fetchImpl,
+  });
+  assert.equal(pinned.temperature, undefined, "nothing declared anywhere");
+  assert.equal(noSource, null);
+});
+
+test("createStrandsDecider takes calibration from the checkpoint config", async () => {
+  const ort = fakeOrt();
+  const transformers = { AutoTokenizer: { from_pretrained: async () => fakeTokenizer() } };
+  const server = configServer({ "strands_decider_config.json": E2B_CONFIG });
+  const decider = await createStrandsDecider({
+    ort,
+    transformers,
+    device: "wasm",
+    fetchImpl: server.fetchImpl,
+    sessionFactory: async (url, opts) => ort.InferenceSession.create(url, opts),
+  });
+  assert.equal(decider.info.temperature, 0.7997762858861774, "checkpoint temperature wins");
+  assert.equal(decider.info.temperaturesByKind.choice, 0.5608428296613732);
+  assert.equal(decider.info.ordinalSmoothing, 0.1);
+  assert.equal(decider.info.maxLen, 4096);
+  assert.match(decider.info.configSource, /strands_decider_config\.json$/);
+  await decider.dispose();
+});
+
+test("createStrandsDecider explicit calibration beats the checkpoint config", async () => {
+  const ort = fakeOrt();
+  const transformers = { AutoTokenizer: { from_pretrained: async () => fakeTokenizer() } };
+  const server = configServer({ "strands_decider_config.json": E2B_CONFIG });
+  const decider = await createStrandsDecider({
+    ort,
+    transformers,
+    device: "wasm",
+    fetchImpl: server.fetchImpl,
+    sessionFactory: async (url, opts) => ort.InferenceSession.create(url, opts),
+    temperature: 2.5,
+    maxLen: 2048,
+  });
+  assert.equal(decider.info.temperature, 2.5);
+  assert.equal(decider.info.maxLen, 2048);
+  assert.equal(decider.info.temperaturesByKind.noul, 1.0704394404346953, "kinds still come from the config");
+  await decider.dispose();
+});
+
+test("createStrandsDecider keeps the pinned defaults when the repo ships no config", async () => {
+  const ort = fakeOrt();
+  const transformers = { AutoTokenizer: { from_pretrained: async () => fakeTokenizer() } };
+  const server = configServer({});
+  const decider = await createStrandsDecider({
+    ort,
+    transformers,
+    device: "wasm",
+    fetchImpl: server.fetchImpl,
+    sessionFactory: async (url, opts) => ort.InferenceSession.create(url, opts),
+  });
+  assert.equal(decider.info.temperature, STRANDS_TEMPERATURE);
+  assert.deepEqual(decider.info.temperaturesByKind, STRANDS_TEMPERATURE_BY_KIND);
+  assert.equal(decider.info.ordinalSmoothing, STRANDS_ORDINAL_SMOOTHING);
+  assert.equal(decider.info.maxLen, STRANDS_DEFAULT_MAX_LEN);
+  assert.equal(decider.info.configSource, null);
+  await decider.dispose();
+});
+
+test("createStrandsDecider reads calibration from calibrationModel when told", async () => {
+  const ort = fakeOrt();
+  const transformers = { AutoTokenizer: { from_pretrained: async () => fakeTokenizer() } };
+  const server = configServer({});
+  const decider = await createStrandsDecider({
+    ort,
+    transformers,
+    device: "wasm",
+    fetchImpl: server.fetchImpl,
+    sessionFactory: async (url, opts) => ort.InferenceSession.create(url, opts),
+    model: "warsang/strands-decider-e2b-web",
+    revision: "deadbeef",
+    calibrationModel: "StrandsAgents/strands-decider-E2B-gemma4-v1-2610",
+  });
+  assert.ok(
+    server.calls.some((u) => u === "https://huggingface.co/StrandsAgents/strands-decider-E2B-gemma4-v1-2610/resolve/main/strands_decider_config.json"),
+    "config read from the source checkpoint, not the ONNX repo",
+  );
+  assert.equal(decider.info.model, "warsang/strands-decider-e2b-web");
+  await decider.dispose();
+});
+
+test("loadStrandsCalibration surfaces a corrupt config rather than guessing", async () => {
+  const server = configServer({ "strands_decider_config.json": "{ not json" });
+  await assert.rejects(
+    () => loadStrandsCalibration({
+      model: "some-org/some-export",
+      fetchImpl: server.fetchImpl,
+    }),
+    /not valid JSON/,
+  );
 });
 
 test("createStrandsDecider rejects bad questions before touching the network", async () => {

@@ -1,5 +1,5 @@
 /**
- * strands.mjs — Strands Decider 2B family (Qwen3.5-2B torso + pointer head).
+ * strands.mjs — Strands Decider family (Qwen3.5-2B / Gemma 4 torso + pointer head).
  *
  * Mirrors the reference Python runtime (`strands-decider`, Apache-2.0,
  * github.com/strands-labs/strands-decider):
@@ -18,6 +18,13 @@
  * (onnx-community/strands-decider-2B-hobson-v19-ONNX, pinned by revision):
  * q8 `onnx/model_quantized.onnx` by default, q4f16 `onnx/model_q4f16.onnx`
  * as the smaller opt-in.
+ *
+ * Calibration is **not** part of the graph: every checkpoint ships its
+ * temperatures in `strands_decider_config.json` (the hobson-v19 pin still
+ * calls it `hobson_config.json`), so `createStrandsDecider` loads that file
+ * and lets it override the pinned reference values. A future checkpoint is
+ * then a model/revision repin — no code change — provided its browser export
+ * ships the config (see export/strands-decider/05_manifest.py).
  */
 
 import { normalizeQuestions } from "./questions.mjs";
@@ -42,6 +49,103 @@ export const STRANDS_DEFAULT_MAX_LEN = 4096;
 export const STRANDS_MAX_QUESTION_FRACTION = 0.75;
 
 export const STRANDS_KIND = { choice: "choice", score: "score", noul: "noul" };
+
+/**
+ * Calibration files a strands-decider checkpoint can ship, tried in order.
+ * hobson-v19 (the original pin) names it `hobson_config.json`; v21 and the
+ * `v1-2610` gemma4/qwen3.5 checkpoints renamed it to
+ * `strands_decider_config.json`.
+ */
+export const STRANDS_CONFIG_FILES = [
+  "strands_decider_config.json",
+  "hobson_config.json",
+];
+
+/**
+ * Read this runtime's calibration out of a checkpoint's config JSON.
+ *
+ * Fallback is field-by-field: whatever the checkpoint does not declare keeps
+ * the caller's value, so a partial config only overrides what it states.
+ * A config declaring a non-pointer head fails loud — the LayerNorm -> q/k
+ * readout implemented here is not interchangeable with any other head.
+ *
+ * @param {object|null} config parsed config file (or null for no config)
+ * @param {{temperature?:number, temperaturesByKind?:object,
+ *   ordinalSmoothing?:number, maxLen?:number}} [fallback]
+ * @returns {{temperature:number|undefined, temperaturesByKind:object,
+ *   ordinalSmoothing:number|undefined, maxLen:number|undefined}}
+ */
+export function parseStrandsCalibration(config, fallback = {}) {
+  const calibration = {
+    temperature: fallback.temperature,
+    temperaturesByKind: { ...(fallback.temperaturesByKind ?? {}) },
+    ordinalSmoothing: fallback.ordinalSmoothing,
+    maxLen: fallback.maxLen,
+  };
+  if (!config || typeof config !== "object") return calibration;
+
+  const headType = config.head_type;
+  if (headType !== undefined && headType !== "pointer") {
+    throw new TypeError(
+      `strands: checkpoint declares head_type "${headType}"; this runtime implements only the pointer head`);
+  }
+
+  const temperature = Number(config.temperature);
+  if (Number.isFinite(temperature) && temperature > 0) {
+    calibration.temperature = temperature;
+  }
+  if (config.temperature_by_kind && typeof config.temperature_by_kind === "object") {
+    for (const kind of Object.keys(STRANDS_KIND)) {
+      const t = Number(config.temperature_by_kind[kind]);
+      if (Number.isFinite(t) && t > 0) calibration.temperaturesByKind[kind] = t;
+    }
+  }
+  const smoothing = Number(config.ordinal_smoothing);
+  if (Number.isFinite(smoothing) && smoothing >= 0) {
+    calibration.ordinalSmoothing = smoothing;
+  }
+  const maxLen = Number(config.max_length);
+  if (Number.isInteger(maxLen) && maxLen >= 512) calibration.maxLen = maxLen;
+  return calibration;
+}
+
+/**
+ * Load the checkpoint's calibration config from the model repo, falling back
+ * field-by-field to the pinned reference values when the repo ships none
+ * (the current onnx-community pin does not) or is unreachable.
+ *
+ * @param {{model:string, revision?:string|null, files?:string[],
+ *   fetchImpl?:Function}} spec
+ * @returns {Promise<{calibration:object, source:string|null}>} `source` is the
+ *   URL the config was read from, or null when the pinned defaults survived.
+ */
+export async function loadStrandsCalibration({
+  model,
+  revision = null,
+  files = STRANDS_CONFIG_FILES,
+  fetchImpl = fetch,
+}) {
+  for (const file of files) {
+    const url = hfUrl(model, revision, file);
+    let res;
+    try {
+      res = await fetchImpl(url);
+    } catch {
+      // Transport failure: try the next candidate name, then the pinned
+      // defaults — the tokenizer/model downloads will surface the outage.
+      continue;
+    }
+    if (!res?.ok) continue; // repo ships no calibration config
+    let config;
+    try {
+      config = await res.json();
+    } catch (e) {
+      throw new Error(`strands: ${url} is not valid JSON: ${e?.message ?? e}`);
+    }
+    return { calibration: parseStrandsCalibration(config), source: url };
+  }
+  return { calibration: parseStrandsCalibration(null), source: null };
+}
 
 // Rendered on both sides of a noul so the two slots read like any other option list.
 const NOUL_DEFAULT_CRITERIA = {
@@ -393,6 +497,14 @@ const hfUrl = (model, revision, file) =>
  *  ort                     — injected onnxruntime-web (lazy import otherwise)
  *  transformers            — injected @huggingface/transformers (tokenizer only)
  *  tokenizerModel/tokenizerRevision — override the tokenizer source
+ *  calibrationModel/calibrationRevision — repo to read the checkpoint's
+ *                            calibration config from; defaults to `model`, or
+ *                            the source checkpoint when passing your own export
+ *  maxLen                  — tokenization window; null = checkpoint's
+ *                            `max_length`, else the pinned 4096
+ *  temperature/temperaturesByKind/ordinalSmoothing — explicit calibration;
+ *                            each overrides the checkpoint config, which
+ *                            overrides the pinned reference values
  *  wasmPaths               — ORT wasm/loader directory (self-hosted builds)
  *  device                  — "auto" | "wasm" | "webgpu"
  *  sessionFactory          — (url, sessionOptions) => Promise<InferenceSession>;
@@ -408,15 +520,17 @@ export async function createStrandsDecider({
   fetchImpl = fetch,
   tokenizerModel = null,
   tokenizerRevision = null,
+  calibrationModel = null,
+  calibrationRevision = null,
   wasmPaths = null,
   device = "auto",
   sessionFactory = null,
   onProgress = null,
-  maxLen = STRANDS_DEFAULT_MAX_LEN,
-  maxQuestionFraction = STRANDS_MAX_QUESTION_FRACTION,
-  temperaturesByKind = STRANDS_TEMPERATURE_BY_KIND,
-  temperature = STRANDS_TEMPERATURE,
-  ordinalSmoothing = STRANDS_ORDINAL_SMOOTHING,
+  maxLen = null,
+  maxQuestionFraction = null,
+  temperaturesByKind = null,
+  temperature = null,
+  ordinalSmoothing = null,
   scope = globalThis,
 } = {}) {
   const ortMod = ort ?? (await import("onnxruntime-web"));
@@ -424,6 +538,36 @@ export async function createStrandsDecider({
   if (wasmPaths) {
     try { ortMod.env.wasm.wasmPaths = wasmPaths; } catch { /* older runtime */ }
   }
+
+  // Calibration resolution order: this call's explicit options, then the
+  // checkpoint's own config file, then the pinned reference constants.
+  const { calibration, source: configSource } = await loadStrandsCalibration({
+    model: calibrationModel ?? model,
+    revision: calibrationRevision ?? (calibrationModel ? "main" : revision),
+    fetchImpl,
+  });
+  const kindTemps = { ...calibration.temperaturesByKind };
+  if (temperaturesByKind && typeof temperaturesByKind === "object") {
+    for (const [kind, t] of Object.entries(temperaturesByKind)) {
+      const v = Number(t);
+      if (Number.isFinite(v) && v > 0) kindTemps[kind] = v;
+    }
+  }
+  const eff = {
+    maxLen: Number.isFinite(maxLen) && maxLen > 0
+      ? maxLen
+      : (calibration.maxLen ?? STRANDS_DEFAULT_MAX_LEN),
+    maxQuestionFraction: Number.isFinite(maxQuestionFraction) && maxQuestionFraction > 0
+      ? maxQuestionFraction
+      : STRANDS_MAX_QUESTION_FRACTION,
+    temperature: Number.isFinite(temperature) && temperature > 0
+      ? temperature
+      : (calibration.temperature ?? STRANDS_TEMPERATURE),
+    ordinalSmoothing: Number.isFinite(ordinalSmoothing) && ordinalSmoothing >= 0
+      ? ordinalSmoothing
+      : (calibration.ordinalSmoothing ?? STRANDS_ORDINAL_SMOOTHING),
+    temperaturesByKind: { ...STRANDS_TEMPERATURE_BY_KIND, ...kindTemps },
+  };
 
   const resolvedDevice = device !== "auto"
     ? device
@@ -484,10 +628,13 @@ export async function createStrandsDecider({
       model,
       revision,
       device: activeDevice,
-      maxLen,
-      temperature,
-      temperaturesByKind: { ...temperaturesByKind },
-      ordinalSmoothing,
+      maxLen: eff.maxLen,
+      temperature: eff.temperature,
+      temperaturesByKind: { ...eff.temperaturesByKind },
+      ordinalSmoothing: eff.ordinalSmoothing,
+      // URL of the checkpoint config the calibration came from, or null when
+      // the repo shipped none and the pinned reference values survived.
+      configSource,
     },
     async decide(state, questions) {
       const t0 = now();
@@ -495,7 +642,8 @@ export async function createStrandsDecider({
       const rendered = normalized.map(renderStrandsQuestion);
       const stateText = renderStrandsState(state);
       const { items, truncated } = buildStrandsBatch({
-        encode, stateText, rendered, maxLen, maxQuestionFraction,
+        encode, stateText, rendered,
+        maxLen: eff.maxLen, maxQuestionFraction: eff.maxQuestionFraction,
       });
       const b = collateStrandsItems(items);
 
@@ -514,9 +662,9 @@ export async function createStrandsDecider({
         rowWidth: b.K,
         questions: normalized,
         rendered,
-        temperaturesByKind,
-        temperature,
-        ordinalSmoothing,
+        temperaturesByKind: eff.temperaturesByKind,
+        temperature: eff.temperature,
+        ordinalSmoothing: eff.ordinalSmoothing,
       });
       const length = Number(b.attention.reduce((a, v) => a + v, 0n));
       const prompts = items.map((it) => decode(it.ids));

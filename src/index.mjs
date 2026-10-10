@@ -39,6 +39,8 @@ export {
   strandsAnswersFromLogits,
   strandsChoiceConfidence,
   strandsScoreConfidence,
+  parseStrandsCalibration,
+  loadStrandsCalibration,
   STRANDS_DEFAULT_MODEL,
   STRANDS_DEFAULT_REVISION,
   STRANDS_DEFAULT_FILE,
@@ -48,6 +50,7 @@ export {
   STRANDS_DEFAULT_MAX_LEN,
   STRANDS_MAX_QUESTION_FRACTION,
   STRANDS_KIND,
+  STRANDS_CONFIG_FILES,
 } from "./strands.mjs";
 export {
   createBekkoDecider,
