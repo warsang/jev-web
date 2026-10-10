@@ -28,10 +28,10 @@ print("graph outputs:", [(o.name, o.shape, o.type) for o in sess.get_outputs()],
 ok_all = True
 worst = 0.0
 for i in range(2):
-    ids, mask, opt = z[f"ids{i}"], z[f"mask{i}"], z[f"opt{i}"]
+    ids, mask, ans, opt = z[f"ids{i}"], z[f"mask{i}"], z[f"ans{i}"], z[f"opt{i}"]
     t = z[f"ref{i}"]
     o = sess.run(None, {"input_ids": ids, "attention_mask": mask,
-                        "opt_idx": opt})[0]
+                        "answer_pos": ans, "option_pos": opt})[0]
     d = float(np.abs(t - o).max())
     worst = max(worst, d)
     agree = bool((t.argmax(-1) == o.argmax(-1)).all())

@@ -284,11 +284,11 @@ Lower-level helpers are exported for custom runtimes:
 `buildLayaSequence`, `collateLayaItems`, `layaAnswersFromLogits`,
 `layaTokenizerAdapter`, `renderLayaOptions`, `layaTempBucket`, `clampTemperature`.
 
-## Strands Decider family (Qwen torso + pointer head)
+## Strands Decider family (pointer head over a Qwen3.5 or Gemma 4 torso)
 
 `createStrandsDecider(options)` runs
 [Strands Decider 2B](https://strandsagents.com/blog/introducing-strands-decider/),
-a 2B-parameter decision model: a Qwen3.5-2B torso (LoRA merged) with its LM head
+a decision model: a Qwen3.5 or Gemma 4 torso (LoRA merged) with its LM head
 replaced by a pointer head that scores each option from its own hidden state
 against the `<answer>` position. One fused ONNX graph, one forward pass for the
 whole batch:
@@ -310,7 +310,7 @@ Protocol implemented here (mirrors the reference Python runtime):
 - graph `input_ids, attention_mask, answer_pos, option_pos → logits`, where
   `answer_pos` is each row's last real token (the `<answer>` pooling position)
   and `option_pos` carries each option line's last-token position (padded with
-  0); the prompt is tokenised in chunks at pre-tokeniser piece boundaries so
+  -1); the prompt is tokenised in chunks at pre-tokeniser piece boundaries so
   those positions are exact with no offset mapping;
 - choice questions accept `criteria` as `{label: description}` (mirroring the
   reference schema); noul slots are fixed `false`/`true` with overridable
@@ -318,14 +318,42 @@ Protocol implemented here (mirrors the reference Python runtime):
 - the question gets first claim on the 4096-token window (up to 75%), the state
   is truncated from the right into what remains, and an over-long question is
   truncated from the front, keeping the options and `<answer>`;
-- per-kind calibration from the checkpoint (`noul` 0.911 / `choice` 0.734 /
-  `score` 1.328); `score` confidence is ordinal (spread-based, with the
-  training smoothing floor), not max-probability.
+- **calibration comes from the checkpoint**, not from this package: the loader
+  reads `strands_decider_config.json` (`hobson_config.json` on v19) from the
+  model repo at start-up and applies its `temperature` / `temperature_by_kind`
+  / `ordinal_smoothing` / `max_length`. A repo that ships no config falls back
+  to the pinned reference values (the current pin's temperatures: `noul` 0.911
+  / `choice` 0.734 / `score` 1.328). `decider.info.configSource` names the file
+  that was used, or `null` for the pinned defaults;
+- explicit `temperature` / `temperaturesByKind` / `ordinalSmoothing` / `maxLen`
+  options still override the checkpoint, which overrides the pinned values;
+  `calibrationModel` points the config load at another repo (e.g. the source
+  checkpoint when your own export predates config shipping);
+- `score` confidence is ordinal (spread-based, with the training smoothing
+  floor), not max-probability.
+
+Checkpoint compatibility (verified against the 2026-10-09 drop):
+
+| checkpoint | params / q8 ONNX | browser? |
+|---|---|---|
+| `2B-hobson-v19` (current pin) | ~2.0B / 1.8 GB | ✅ shipped |
+| `2B-qwen3.5-v1-2610`, `E2B-gemma4-v1-2610` | ~2.1B / ~2.1 GB | ✅ export-ready (E2B: see caveat below) |
+| `E4B-gemma4-v1-2610` | ~5.7B / ~5.7 GB | ⚠️ opt-in heavy only |
+| `12B-gemma4-v1-2610` | ~13.3B / ~13 GB | ❌ too heavy |
+| `26B-A4B-gemma4-v1-2610` (MoE, 128 experts) | ~26B / ~26 GB | ❌ too heavy |
+
+A new browser-eligible checkpoint needs an ONNX export plus a model/revision
+repin — no runtime code change (`export/strands-decider/` documents the
+pipeline and its browser-feasibility gate). Caveat: the E2B model card reports
+a faulty GPU kernel path for *multi-question* yes/no answers before an upstream
+attention fix; this runtime batches every question into one forward pass, so
+validate multi-question parity before pinning E2B as a default.
 
 Lower-level helpers are exported for custom runtimes:
 `renderStrandsQuestion`, `renderStrandsState`, `renderStrandsContent`,
 `buildStrandsBatch`, `collateStrandsItems`, `strandsOptionTokenIndices`,
-`strandsAnswersFromLogits`, `strandsChoiceConfidence`, `strandsScoreConfidence`.
+`strandsAnswersFromLogits`, `strandsChoiceConfidence`, `strandsScoreConfidence`,
+`parseStrandsCalibration`, `loadStrandsCalibration`.
 
 ## Bekko family (Ettin cross-encoder)
 

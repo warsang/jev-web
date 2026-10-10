@@ -1,19 +1,30 @@
 """Stage 2: export the fused decider graph to ONNX and tiny-validate with ORT.
 
-Graph contract (must match jev-web/src/strands.mjs):
-  inputs:  input_ids int64 [B, L], attention_mask int64 [B, L], opt_idx int64 [B, K]
+Graph contract (must match jev-web/src/strands.mjs AND the published
+onnx-community export — both feed answer_pos/option_pos):
+  inputs:  input_ids int64 [B, L], attention_mask int64 [B, L],
+           answer_pos int64 [B], option_pos int64 [B, K] (-1 = padded)
   output:  logits float32 [B, K]  (raw, no temperature/softmax)
 
-Math mirrors modeling.py exactly:
+Math mirrors modeling.py / onnx-community's fuse.py exactly:
   hidden = torso(input_ids, attention_mask).last_hidden_state      # fp16 [B,L,d]
-  pooled = hidden[b, last_unmasked_position_b]                      # fp16 [B,d]
-  options = hidden.gather(1, opt_idx.clamp_min(0))                  # fp16 [B,K,d]
-  head (fp32): LayerNorm -> q/k Linear(d,256) ->
-               logits = (k_out @ q_out) * 256**-0.5                # fp32 [B,K]
+  answer  = hidden.gather(1, answer_pos.view(B,1,1))               # fp16 [B,d]
+  options = hidden.gather(1, option_pos.clamp_min(0))              # fp16 [B,K,d]
+  head (fp32): LayerNorm -> q/k Linear(d,D) ->
+               logits = (k_out @ q_out) * D**-0.5                 # fp32 [B,K]
+
+answer_pos is each row's last real token (the `<answer>` pooling position);
+option_pos sits at each option line's last token. The JS collate pads option
+slots with -1, hence clamp_min(0) — padded slots are never read back.
 """
 import json, os, sys, torch
 import torch.nn as nn
 from safetensors.torch import load_file
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from torso_support import (
+    apply_qwen3_5_export_patch, resolve_torso_class, torso_family,
+)
 
 OUT = os.path.expanduser("~/workspace/strands-export")
 MERGED = f"{OUT}/merged"
@@ -38,18 +49,19 @@ class DeciderExport(nn.Module):
             p.requires_grad_(False)
         self.scale = pointer_dim ** -0.5
 
-    def forward(self, input_ids, attention_mask, opt_idx):
+    def forward(self, input_ids, attention_mask, answer_pos, option_pos):
         out = self.torso(input_ids=input_ids, attention_mask=attention_mask,
                          use_cache=False, return_dict=True)
         hidden = out.last_hidden_state                      # [B, L, d]
         d = hidden.size(-1)
-        # last-unmasked pooling via gather (export-friendly, keeps B dynamic)
-        lengths = attention_mask.sum(dim=1, keepdim=True)   # [B, 1]
-        pidx = (lengths - 1).unsqueeze(-1).expand(-1, 1, d)  # [B, 1, d]
-        pooled = hidden.gather(1, pidx).squeeze(1)          # [B, d]
+        b = hidden.size(0)
+        # exact-position readout: the JS runtime hands us the `<answer>` token
+        # and each option line's last token (padded slots arrive as -1).
+        answer = hidden.gather(                               # [B, 1, d]
+            1, answer_pos.view(b, 1, 1).expand(b, 1, d)).squeeze(1)
         options = hidden.gather(                             # [B, K, d]
-            1, opt_idx.clamp_min(0).unsqueeze(-1).expand(-1, -1, d))
-        decide = self.q(self.norm(pooled.float())).unsqueeze(-1)   # [B, dim, 1]
+            1, option_pos.clamp_min(0).unsqueeze(-1).expand(-1, -1, d))
+        decide = self.q(self.norm(answer.float())).unsqueeze(-1)   # [B, dim, 1]
         keys = self.k(self.norm(options.float()))                  # [B, K, dim]
         return (keys @ decide).squeeze(-1) * self.scale             # [B, K]
 
@@ -57,28 +69,28 @@ class DeciderExport(nn.Module):
 def load_export_model():
     import transformers
     from safetensors import safe_open
-    # Patch the DeltaNet chunk loop for exportability (see export_patch.py).
-    # Must happen before the model is built.
-    import transformers.models.qwen3_5.modeling_qwen3_5 as qm
-    import transformers.models.qwen3_5.modular_qwen3_5 as qmm
-    sys.path.insert(0, OUT)
-    from export_patch import patched_torch_chunk_gated_delta_rule as _patched
-    qm.torch_chunk_gated_delta_rule = _patched
-    qmm.torch_chunk_gated_delta_rule = _patched
-    print("DeltaNet export patch applied", flush=True)
     with open(f"{MERGED}/hidden_size.json") as fh:
-        hidden_size = json.load(fh)["hidden_size"]
-    print("building torso with proper init (fp16 default dtype, no ckpt load)...",
+        meta = json.load(fh)
+    hidden_size = meta["hidden_size"]
+    family = meta.get("torso_family") or torso_family()
+    if family == "qwen3_5":
+        # Qwen3.5's GatedDeltaNet layers need the while_loop patch before the
+        # model is built (bit-identical, verified — see export_patch.py).
+        apply_qwen3_5_export_patch(OUT)
+    print(f"building {family} torso with proper init (fp16 default dtype, no ckpt load)...",
           flush=True)
     base_cfg = transformers.AutoConfig.from_pretrained(f"{OUT}/base")
     text_cfg = base_cfg.get_text_config()
+    TorsoCls, accessor = resolve_torso_class(transformers, family)
     prev_dtype = torch.get_default_dtype()
     torch.set_default_dtype(torch.float16)
     try:
-        lm = transformers.Qwen3_5ForCausalLM(text_cfg)
+        lm = TorsoCls(base_cfg if family == "gemma4" else text_cfg)
     finally:
         torch.set_default_dtype(prev_dtype)
-    torso = lm.model
+    torso = lm
+    for part in accessor.split("."):
+        torso = getattr(torso, part)
     del lm
     print("streaming fp16 weights into torso...", flush=True)
     sd = torso.state_dict()
@@ -109,7 +121,8 @@ def main():
         # [65, 4096] (see export_patch notes on the seq=64 solver quirk).
         args = (torch.ones(1, 128, dtype=torch.long),
                 torch.ones(1, 128, dtype=torch.long),
-                torch.tensor([[120, 100, 80]], dtype=torch.long))
+                torch.tensor([127], dtype=torch.long),
+                torch.tensor([[120, 100, -1]], dtype=torch.long))
         with torch.no_grad():
             ref = model(*args)
         print("torch ref logits:", ref.flatten().tolist(), flush=True)
@@ -124,9 +137,11 @@ def main():
             dynamic_shapes=(
                 {0: batch, 1: seq},
                 {0: batch, 1: seq},
+                {0: batch},
                 {0: batch, 1: n_options},
             ),
-            input_names=["input_ids", "attention_mask", "opt_idx"],
+            input_names=["input_ids", "attention_mask",
+                         "answer_pos", "option_pos"],
             output_names=["logits"],
         )
         path = f"{EXPORT}/model_fp16.onnx"
@@ -153,18 +168,20 @@ def tiny_validate(model, path):
     import numpy as np
     feeds = [
         (np.ones((1, 16), np.int64), np.ones((1, 16), np.int64),
-         np.array([[14, 10]], np.int64)),
+         np.array([15], np.int64), np.array([[14, 10, -1]], np.int64)),
         (np.ones((2, 32), np.int64), np.ones((2, 32), np.int64),
-         np.array([[30, 20, 10, 5], [31, 21, 11, 6]], np.int64)),
+         np.array([31, 31], np.int64),
+         np.array([[30, 20, 10, 5], [31, 21, -1, -1]], np.int64)),
     ]
     refs = {}
-    for i, (ids, mask, opt) in enumerate(feeds):
+    for i, (ids, mask, ans, opt) in enumerate(feeds):
         with torch.no_grad():
             t = model(torch.from_numpy(ids), torch.from_numpy(mask),
-                      torch.from_numpy(opt)).numpy()
+                      torch.from_numpy(ans), torch.from_numpy(opt)).numpy()
         refs[f"ref{i}"] = t
         refs[f"ids{i}"] = ids
         refs[f"mask{i}"] = mask
+        refs[f"ans{i}"] = ans
         refs[f"opt{i}"] = opt
         print(f"  feed {i}: torch logits {t.flatten()[:4].tolist()}",
               flush=True)
@@ -182,10 +199,10 @@ def tiny_validate(model, path):
           flush=True)
     z = np.load(f"{EXPORT}/tiny_refs.npz")
     for i in range(2):
-        ids, mask, opt = z[f"ids{i}"], z[f"mask{i}"], z[f"opt{i}"]
+        ids, mask, ans, opt = z[f"ids{i}"], z[f"mask{i}"], z[f"ans{i}"], z[f"opt{i}"]
         t = z[f"ref{i}"]
         o = sess.run(None, {"input_ids": ids, "attention_mask": mask,
-                            "opt_idx": opt})[0]
+                            "answer_pos": ans, "option_pos": opt})[0]
         d = np.abs(t - o).max()
         agree = (t.argmax(-1) == o.argmax(-1)).all()
         print(f"shape {ids.shape}/{opt.shape}: max|dtorch-donnx|={d:.2e} "
