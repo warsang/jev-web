@@ -1,5 +1,35 @@
 # Strands Decider — browser export: resume guide
 
+Status as of 2026-10-11: **the qwen3.5-v1-2610 export is done and uploaded.**
+Torso merge, ONNX export (4-input answer_pos/option_pos contract) and parity all
+pass on this box; the graph shipped fp16 because quantization did not (see
+"Quantization" below). hobson-v19 remains the default pin; the new checkpoint is
+selectable as { variant: "qwen3.5-v1" }.
+
+- exported: warsang/strands-decider-2b-qwen3v1-web @ 5a5c936ac501379211b64181239301c95e2675d1
+  (3.95 GB: fp16 graph, the checkpoint strands_decider_config.json, tokenizer)
+- parity: ONNX vs torch on the 15-prompt set - worst |dlogit| 2.75e-3, argmax 100%
+- calibration picked up from the shipped config: noul 1.070 / choice 0.863 /
+  score 1.834 (pointer_dim 768, not the v19 default 256 - 02_export.py reads it
+  from the checkpoint config)
+
+## Quantization (why fp16 ships)
+
+- ORT 1.31 no longer ships matmul_4bits_quantizer; its replacement
+  (matmul_nbits_quantizer) skips every MatMul of a dynamo export (weights sit
+  behind Transpose nodes).
+- quantize_dynamic(q8) fails before quantizing: the exporter own value_info
+  conflicts with shape inference (dimension 0: (2048) vs (768)) - the pointer
+  head width against the torso hidden size.
+- Re-inferring means re-serialising a 3.7 GB proto, which onnx cannot do
+  (>2 GB protobuf limit; the external-data save path thrashes).
+- Follow-ups: the onnx-community conversion route (the repo hosting the v19
+  graph quantized this architecture successfully), or strip the conflicting
+  value_info and hand-roll weight-only int8 with DequantizeLinear (no
+  activation quantization - the part that drifts on the GatedDeltaNet delta
+  rule, per the vega measurements).
+
+
 Status as of 2026-10-10: the pipeline is **torso-agnostic and
 calibration-shipping**. The original hobson-v19 run was blocked on RAM for the
 final ONNX save (build box had 7 GB; the save needs 16 GB+); the *published*

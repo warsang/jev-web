@@ -345,7 +345,20 @@ Checkpoint compatibility (verified against the 2026-10-09 drop):
 
 A new browser-eligible checkpoint needs an ONNX export plus a model/revision
 repin — no runtime code change (`export/strands-decider/` documents the
-pipeline and its browser-feasibility gate). Caveat: the E2B model card reports
+pipeline and its browser-feasibility gate). Named checkpoints are addressed
+through `STRANDS_VARIANTS` — temperatures are never baked into a variant,
+they ship with the checkpoint:
+
+```js
+const decider = await createStrandsDecider({ variant: "qwen3.5-v1" }); // the newer Qwen torso
+const decider2 = await createStrandsDecider();                        // hobson-v19, the default
+```
+
+`qwen3.5-v1` currently ships the exact fp16 graph (~3.7 GB) because dynamic
+q8 fails shape-inference on this graph's export metadata and the weight-only
+path drifts on the GatedDeltaNet delta rule (see
+`export/strands-decider/RESUME.md`), so it stays an opt-in until a quantized
+build lands. Caveat: the E2B model card reports
 a faulty GPU kernel path for *multi-question* yes/no answers before an upstream
 attention fix; this runtime batches every question into one forward pass, so
 validate multi-question parity before pinning E2B as a default.

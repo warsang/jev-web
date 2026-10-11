@@ -41,52 +41,35 @@ def run_parity(onnx_path, inputs):
 
 def main():
     from onnxruntime.quantization import quantize_dynamic, QuantType
-    from onnxruntime.quantization.matmul_4bits_quantizer import MatMul4BitsQuantizer
 
     fp16_path = f"{EXPORT}/model_fp16.onnx"
-    q4_path = f"{EXPORT}/model_q4.onnx"
     q8_path = f"{EXPORT}/model_q8.onnx"
 
     inputs = parity_inputs()
     print(f"parity set: {len(inputs)} prompts", flush=True)
 
-    print("quantizing to 4-bit (weight-only, MatMul4BitsQuantizer)...", flush=True)
-    quant = MatMul4BitsQuantizer(model=fp16_path, block_size=128,
-                                 is_symmetric=True, nodes_to_exclude=None)
-    quant.process()
-    quant.model.save_model_to_file(q4_path, use_external_data_format=True)
-    print("saved", q4_path, flush=True)
+    # q8 dynamic weights (the 4-bit weight-only quantizer no longer ships in
+    # modern onnxruntime, and its replacement skips the Transpose-wrapped
+    # weights of a dynamo export; dynamic q8 is what the gate below validates)
+    print("quantizing to q8 (dynamic)...", flush=True)
+    quantize_dynamic(fp16_path, q8_path, weight_type=QuantType.QUInt8)
+    print("saved", q8_path, flush=True)
 
     ref = run_parity(fp16_path, inputs)
-    q4 = run_parity(q4_path, inputs)
+    q8 = run_parity(q8_path, inputs)
     worst, agree = 0.0, True
-    for (n1, r, lab), (n2, q, _) in zip(ref, q4):
+    for (n1, r, lab), (n2, q, _) in zip(ref, q8):
         d = float(np.abs(r - q).max())
         worst = max(worst, d)
         ok = int(r.argmax()) == int(q.argmax())
         agree &= ok
         print(f"[{'OK ' if ok else 'MISMATCH'}] {n1:16s} max|d|={d:.2e} "
-              f"fp16={lab[int(r.argmax())]!r} q4={lab[int(q.argmax())]!r}",
+              f"fp16={lab[int(r.argmax())]!r} q8={lab[int(q.argmax())]!r}",
               flush=True)
 
-    report = {"q4": {"worst_abs_logit_diff": worst, "argmax_agreement": bool(agree)}}
-    winner, wpath = "q4", q4_path
-    if not agree:
-        print("q4 failed argmax agreement -> falling back to q8 dynamic", flush=True)
-        quantize_dynamic(fp16_path, q8_path, weight_type=QuantType.QUInt8)
-        q8 = run_parity(q8_path, inputs)
-        worst8, agree8 = 0.0, True
-        for (n1, r, lab), (n2, q, _) in zip(ref, q8):
-            d = float(np.abs(r - q).max())
-            worst8 = max(worst8, d)
-            ok = int(r.argmax()) == int(q.argmax())
-            agree8 &= ok
-            print(f"[{'OK ' if ok else 'MISMATCH'}] {n1:16s} max|d|={d:.2e}",
-                  flush=True)
-        report["q8"] = {"worst_abs_logit_diff": worst8,
-                        "argmax_agreement": bool(agree8)}
-        winner, wpath = "q8", q8_path
-        assert agree8, "q8 also failed argmax agreement"
+    report = {"q8": {"worst_abs_logit_diff": worst, "argmax_agreement": bool(agree)}}
+    winner, wpath = "q8", q8_path
+    assert agree, "q8 failed argmax agreement"
 
     print(f"\nWINNER: {winner} worst|d|={report[winner]['worst_abs_logit_diff']:.2e}",
           flush=True)
