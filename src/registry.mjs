@@ -50,6 +50,12 @@ import {
   KEV_DEFAULT_REVISION,
 } from "./kev.mjs";
 
+import {
+  createVegaDecider,
+  VEGA_DEFAULT_MODEL,
+  VEGA_DEFAULT_REVISION,
+} from "./vega.mjs";
+
 const families = new Map();
 
 /**
@@ -119,6 +125,14 @@ registerDecisionFamily("kev", {
     revision: KEV_DEFAULT_REVISION,
   },
   create: createKevDecider,
+});
+
+registerDecisionFamily("vega", {
+  defaults: {
+    model: VEGA_DEFAULT_MODEL,
+    revision: VEGA_DEFAULT_REVISION,
+  },
+  create: createVegaDecider,
 });
 
 /**
