@@ -10,10 +10,11 @@ calibrated probability distribution per question comes back from a **single
 forward pass**. No server, no API keys, no network calls after the weights are
 cached.
 
-Three model families ship today — open-jev (fused DeBERTa graph), Laya
+Seven model families ship today — open-jev (fused DeBERTa graph), Laya
 (ModernBERT encoder + typed head), Strands Decider 2B (Qwen torso + pointer
 head), Bekko System One v0 (Ettin cross-encoder), Decision 2.0 (Qwen3 +
-candidate head), and Kev (Qwen3 + pointer head) — behind one registry:
+candidate head), Kev (Qwen3 + pointer head), and Vega 0.8B (frozen Qwen3.5
+torso + latent decision-physics engine) — behind one registry:
 `createDecisionRuntime({ family, fallback })`.
 
 This is a generic runtime, not a classifier for any particular domain. You bring

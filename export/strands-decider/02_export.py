@@ -72,6 +72,9 @@ def load_export_model():
     with open(f"{MERGED}/hidden_size.json") as fh:
         meta = json.load(fh)
     hidden_size = meta["hidden_size"]
+    # the pointer head width is checkpoint-specific (256 on hobson-v19,
+    # 768 on the v1-2610 checkpoints) and is not the torso hidden size
+    pointer_dim = int(meta.get("ckpt_config", {}).get("pointer_dim", 256))
     family = meta.get("torso_family") or torso_family()
     if family == "qwen3_5":
         # Qwen3.5's GatedDeltaNet layers need the while_loop patch before the
@@ -105,7 +108,7 @@ def load_export_model():
                 print(f"  {i + 1}/{len(fkeys)}", flush=True)
     print("torso weights loaded", flush=True)
     head_state = load_file(f"{MERGED}/head_fp32.safetensors")
-    model = DeciderExport(torso, head_state, hidden_size).eval()
+    model = DeciderExport(torso, head_state, hidden_size, pointer_dim=pointer_dim).eval()
     return model
 
 
