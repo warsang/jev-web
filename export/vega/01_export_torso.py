@@ -13,13 +13,11 @@ Lcap = |feature_layers| = 2 (layers 13 and 19 of 24); the JS consumer slices
 slots 0..2 (state/question/last) from every captured layer, the option spans
 and chunk rows from the deepest captured layer (option_layers == [19]).
 
-The backbone runs in fp16 (0.8B torso, ~0.9 GB); quantize afterwards with
-02_quantize.py. Qwen3.5's GatedDeltaNet chunked scan is patched to a
-while_loop first (export_patch.py, validated bit-identical on the strands 2B
-export); this script's parity stage compares against the UNPATCHED reference.
-
-Requires 16 GB RAM-free box only lightly: 0.8B fp16 model + ONNX program fit
-in a few GB.
+The backbone runs in fp32 on purpose: quantize_dynamic needs float
+activations (DynamicQuantizeLinear rejects fp16), and post-hoc fp16 surgery
+on the exported graph is not reliable. A 0.8B fp32 torso is ~3.4 GB; the q8
+quantize afterwards in 04_repo.py brings it to ~0.85 GB.
+Requires a box with ~10 GB free RAM (fp32 model + ONNX program).
 """
 from __future__ import annotations
 
@@ -85,9 +83,9 @@ class TorsoExport(torch.nn.Module):
 def main():
     from transformers import AutoModelForCausalLM
 
-    print("loading frozen backbone (fp16)...", flush=True)
+    print("loading frozen backbone (fp32)...", flush=True)
     model = AutoModelForCausalLM.from_pretrained(
-        BASE, attn_implementation="sdpa", dtype=torch.float16)
+        BASE, attn_implementation="sdpa", dtype=torch.float32)
     model.eval()
     for p in model.parameters():
         p.requires_grad_(False)
@@ -138,7 +136,7 @@ def main():
         ref = wrapper(input_ids, attention, pool)
     print("torch pooled:", tuple(ref.shape), "sample:", ref[0, 0, 0, :3].tolist(), flush=True)
 
-    path = f"{EXPORT}/torso_fp16.onnx"
+    path = f"{EXPORT}/torso_fp32.onnx"
     from torch.export import Dim
     batch = Dim("batch", min=1, max=8)
     seq = Dim("seq", min=16, max=MAX_LEN)

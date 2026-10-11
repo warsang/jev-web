@@ -217,8 +217,144 @@ test("thermal features and probabilities match the reference fit", () => {
   });
 });
 
-test("vegaAnswers decodes the typed answers with conformal + abstain flags", () => {
-  const t = fixture.thermal;
+// ---------------------------------------------------------------------------
+// createVegaDecider with injected fakes (no network, no real graphs)
+// ---------------------------------------------------------------------------
+
+function fakeVegaSessions({ logits = [1.5, -0.4, 0.2, 0.9] } = {}) {
+  class Tensor {
+    constructor(type, data, dims) { this.type = type; this.data = data; this.dims = dims; }
+  }
+  const torsoCalls = [];
+  const engineCalls = [];
+  const torso = {
+    run: async (inputs) => {
+      torsoCalls.push(inputs);
+      const [b, rows] = inputs.pool.dims[0] === undefined ? [1, 1] : [inputs.pool.dims[0], inputs.pool.dims[1]];
+      const d = 1024;
+      // [B, Lcap=2, rows, d]: pretend every segment is a constant vector.
+      const pooled = new Float32Array(b * 2 * rows * d);
+      for (let i = 0; i < pooled.length; i++) pooled[i] = 0.01 * ((i % 17) - 8);
+      return { pooled: new Tensor("float32", pooled, [b, 2, rows, d]) };
+    },
+    release: async () => {},
+  };
+  const engine = {
+    run: async (inputs) => {
+      engineCalls.push(inputs);
+      const b = inputs.qtype.dims[0];
+      const K = inputs.opts.dims[1];
+      // favour option 0 in every row, so decoded answers are predictable
+      const data = new Float32Array(b * K);
+      for (let i = 0; i < b; i++) { data[i * K] = 5; for (let j = 1; j < K; j++) data[i * K + j] = -1; }
+      return {
+        logits: new Tensor("float32", data, [b, K]),
+        kinetic: new Tensor("float32", [0.02, 0.01].slice(0, b), [b]),
+        nearest: new Tensor("float32", [0.3, 0.2].slice(0, b), [b]),
+        steps_used: new Tensor("int64", BigInt64Array.from([12, 5].slice(0, b), BigInt), [b]),
+        grad_norm: new Tensor("float32", [0.1, 0.1].slice(0, b), [b]),
+      };
+    },
+    release: async () => {},
+  };
+  return { torso, engine, torsoCalls, engineCalls, Tensor };
+}
+
+test("createVegaDecider wires both graphs and decodes all three kinds", async () => {
+  const { createVegaDecider } = await import("../src/vega.mjs");
+  const { torso, engine, torsoCalls, engineCalls, Tensor } = fakeVegaSessions();
+  const ort = { env: { wasm: {} }, Tensor, InferenceSession: { create: async () => torso } };
+  const transformers = { AutoTokenizer: { from_pretrained: async () => fakeVegaTokenizer() } };
+  const decider = await createVegaDecider({
+    ort,
+    transformers,
+    device: "wasm",
+    sessionFactory: await fakeVegaSessionFactory({ torso, engine }),
+    fetchImpl: async () => ({
+      ok: true,
+      json: async () => ({
+        ...cfg,
+        calibration: fixture.calibration,
+        theta: fixture.thermal.theta,
+      }),
+    }),
+  });
+  assert.equal(decider.info.family, "vega");
+  assert.equal(decider.info.maxLen, cfg.max_len);
+  assert.match(decider.info.calibrationSource, /vega_config\.json$/);
+  assert.equal(decider.info.nSteps, cfg.n_steps);
+
+  const choiceQ = { type: "choice", instructions: "Which team?", options: ["billing", "tech", "sales"] };
+  const noulQ = { type: "noul", instructions: "Urgent?", options: ["no", "yes"] };
+  const scoreQ = { type: "score", instructions: "How bad?", options: ["lo", "mid", "hi"] };
+  const { answers, truncated, length, prompts, timings } = await decider.decide(
+    "I was charged twice for the same order.", [choiceQ, noulQ, scoreQ]);
+
+  assert.equal(torsoCalls.length, 1, "one causal read for the whole batch");
+  assert.equal(engineCalls.length, 1, "one engine forward for the whole batch");
+  assert.equal(truncated, false);
+  assert.ok(length > 0);
+  assert.equal(prompts.length, 3);
+  assert.ok(timings.totalMs >= 0 && timings.runMs >= 0);
+
+  const [a0, a1, a2] = answers;
+  assert.equal(a0.type, "choice");
+  // the fake logits favour option 0 for every row
+  assert.equal(a0.choice, "billing");
+  assert.ok(a0.confidence > 0.5);
+  assert.ok("predictionSet" in a0 && "abstain" in a0 && "unbound" in a0);
+  assert.equal("settleSteps" in a0 && "energy" in a0, true);
+  assert.equal(a1.type, "noul");
+  assert.ok(a1.noul > 0 && a1.noul < 1);
+  assert.equal(a2.type, "score");
+  assert.equal(a2.level, 0);
+  assert.ok(a2.score >= 0 && a2.score <= 2);
+  await decider.dispose();
+});
+
+test("createVegaDecider keeps pinned defaults without a config and honours maxLen", async () => {
+  const { createVegaDecider } = await import("../src/vega.mjs");
+  const { torso, engine, Tensor } = fakeVegaSessions();
+  const ort = { env: { wasm: {} }, Tensor, InferenceSession: { create: async () => torso } };
+  const decider = await createVegaDecider({
+    ort,
+    transformers: { AutoTokenizer: { from_pretrained: async () => fakeVegaTokenizer() } },
+    device: "wasm",
+    sessionFactory: await fakeVegaSessionFactory({ torso, engine }),
+    fetchImpl: async () => ({ ok: false, json: async () => ({}) }),
+    maxLen: 512,
+  });
+  assert.equal(decider.info.maxLen, 512, "explicit maxLen wins over the checkpoint window");
+  assert.equal(decider.info.calibrationSource, null);
+  assert.equal(decider.info.nSteps, VEGA_DEFAULTS.nSteps);
+  const { answers } = await decider.decide("s", [{ type: "choice", instructions: "?", options: ["a", "b"] }]);
+  assert.equal(answers.length, 1);
+  await decider.dispose();
+});
+
+async function fakeVegaSessionFactory(sessions) {
+  // (url, opts) => the right fake session by file path
+  return async (url) => {
+    const path = String(url);
+    if (path.includes("torso")) return sessions.torso;
+    if (path.includes("engine")) return sessions.engine;
+    throw new Error(`unexpected model URL: ${path}`);
+  };
+}
+
+/** char-level tokenizer stand-in. */
+function fakeVegaTokenizer() {
+  const tok = (text) => ({
+    input_ids: {
+      data: BigInt64Array.from([...String(text)].map((c) => (c.charCodeAt(0) % 90) + 10), BigInt),
+    },
+  });
+  tok.bos_token_id = null;
+  tok.decode = (ids) => `decoded:${Array.from(ids).join(" ")}`;
+  return tok;
+}
+
+test("vegaAnswers decodes the typed answers with conformal + abstain flags", () => {  const t = fixture.thermal;
   const phys = vegaThermalFeatures({
     kinetic: [0.01, 0.4, 0.02], nearest: [0.5, 3.2, 0.1],
     stepsUsed: [12, 5, 12], nOpts: t.nOpts, maxSteps: cfg.n_steps,
