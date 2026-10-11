@@ -25,6 +25,7 @@ OUT = os.environ.get("STRANDS_OUT", os.path.expanduser("~/workspace/vega-export"
 BASE = f"{OUT}/base"
 CKPT = f"{OUT}/ckpt"
 EXPORT = f"{OUT}/export"
+FINAL = f"{OUT}/final"
 sys.path.insert(0, CKPT)
 
 N_ITEMS = int(os.environ.get("PARITY_ITEMS", "24"))
@@ -76,7 +77,7 @@ def main():
                 adapters="off", calibration="default")
     tok = vega.perc.tok
 
-    torso = ort.InferenceSession(f"{EXPORT}/torso_quantized.onnx", providers=["CPUExecutionProvider"])
+    torso = ort.InferenceSession(f"{FINAL}/onnx/torso_fp16.onnx", providers=["CPUExecutionProvider"])
     engine = ort.InferenceSession(f"{EXPORT}/engine.onnx", providers=["CPUExecutionProvider"])
 
     items_recs = load_items()
@@ -100,12 +101,13 @@ def main():
             opt_max_tokens=cfg["opt_max_tokens"],
             query_first_max_state=cfg.get("query_first_max_state", 0))
         feats_ref, opt_ref = vega.perc.pooled([{"ids": np.asarray(ids, np.int32), "spans": spans}])
-        out_ref = vega.engine(
-            feats_ref, torch.stack([opt_ref]).unsqueeze(2),
-            torch.tensor([[True] * len(qdef)]),
-            torch.tensor([vega_common.QTYPES[q["t"]]]),
-            halt=True, return_traj=False, prestandardized=False,
-            chunks=None, chunk_mask=None)
+        with torch.no_grad():
+            out_ref = vega.engine(
+                feats_ref, opt_ref.unsqueeze(0),
+                torch.tensor([[True] * len(qdef)]),
+                torch.tensor([vega_common.QTYPES[q["t"]]]),
+                halt=True, return_traj=False, prestandardized=False,
+                chunks=None, chunk_mask=None)
         phys_ref = vega_common.thermal_features(out_ref, torch.ones(1, len(qdef), dtype=torch.bool),
                                                 vega.engine.max_steps).numpy()
         probs_ref = vega_common.softmax_np(

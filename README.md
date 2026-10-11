@@ -499,7 +499,8 @@ wells is the answer distribution:
 import { createVegaDecider } from "jev-web";
 
 const decider = await createVegaDecider({
-  // defaults to warsang/vega-08b-web @ pinned revision
+  // defaults to warsang/vega-08b-web (revision pinned once the export repo
+  // lands — export/vega/05_upload.py prints the sha for VEGA_DEFAULT_REVISION)
   onProgress: (p) => console.log(p.phase, p.loaded, p.total),
 });
 const { answers } = await decider.decide(stateText, questions);
@@ -530,9 +531,13 @@ Protocol implemented here (mirrors the reference `vega_common.py` / `vega_api.py
   option texts as levels.
 
 Caveats: the checkpoint's gated task adapters are not shipped in v1 — the
-runtime uses the base engine, which is the source repo's default; and the
-prompt window is the trained 73,728 tokens, so pass `maxLen` to cap a
-browser's read.
+runtime uses the base engine, which is the source repo's default; the torso
+ships as the exact fp16 graph (~1.5 GB, the weight class of the strands 2B q8
+default) because q8 on this graph drifts on the GatedDeltaNet delta rule,
+with the measured q8 experiment available as an opt-in file; and the prompt
+window is the trained 73,728 tokens, so pass `maxLen` to cap a browser's
+read. The browser export repo (`warsang/vega-08b-web`, ~1.7 GB) is uploaded
+by `export/vega/05_upload.py`; the revision lands in `VEGA_DEFAULT_REVISION`.
 
 Lower-level helpers are exported for custom runtimes:
 `buildVegaPrompt`, `packVegaBatch`, `packVegaChunks`, `vegaQuestionDef`,
