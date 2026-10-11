@@ -33,9 +33,7 @@ import { softmaxWithTemperature } from "./answers.mjs";
 import { fetchCachedBytes, fetchOnnxExternalData } from "./laya.mjs";
 
 export const VEGA_DEFAULT_MODEL = "warsang/vega-08b-web";
-// null = the branch default (main) until the browser export repo lands;
-// export/vega/05_upload.py prints the sha to pin here.
-export const VEGA_DEFAULT_REVISION = null;
+export const VEGA_DEFAULT_REVISION = "d2bd4604ed770ca614745f07f623b66e89f406e4";
 // The exact fp16 torso ships by default: q8 on this graph drifts on the
 // GatedDeltaNet delta rule (export/vega/04_repo.py measures ~0.46 in the
 // pooled features), so torso_quantized.onnx stays an opt-in experiment.
