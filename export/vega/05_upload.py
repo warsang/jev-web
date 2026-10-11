@@ -52,7 +52,6 @@ def main():
         repo_id=REPO,
         folder_path=FINAL,
         repo_type="model",
-        multi_commits=True,
         commit_message="vega-08b-web: browser export (fp16 torso + fp32 engine)",
     )
     sha = getattr(commit, "oid", None) or (commit.get("commitUrl") if isinstance(commit, dict) else None)
