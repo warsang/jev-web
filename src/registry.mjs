@@ -3,10 +3,9 @@
  *
  * jev-web ships three families today — open-jev (fused DeBERTa graph), Laya
  * (ModernBERT encoder + typed head), Strands Decider 2B (Qwen3.5/Gemma4 torso
- * + pointer head), Bekko System One v0 (cross-encoder), Decision 2.0 (Qwen3 +
- * candidate head), Kev (Qwen3 + pointer head), and Vega 0.8B (frozen Qwen3.5
- * torso + latent decision-physics engine) — and any third party can add its
- * own without touching core:
+ * + pointer head), Bekko System One v0 (cross-encoder), and Decision 2.0 (Qwen3 +
+ * candidate head) — and any third party can add its own without touching
+ * core:
  *
  *   registerDecisionFamily("my-model", {
  *     defaults: { model: "org/my-typed-decision-ONNX", revision: "main" },
