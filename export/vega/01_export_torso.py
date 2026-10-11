@@ -98,7 +98,6 @@ def main():
     # chunk rows are exercised (C chunk rows + padded option slots).
     from vega_common import build_prompt
     tok = __import__("transformers").AutoTokenizer.from_pretrained(BASE)
-    long_state = "Support log line %d.\n" % 1
     long_state = "".join(f"Support log line {i} with some filler tokens to pad the state.\n" for i in range(40))
     questions = [
         {"t": "choice", "ins": "Which team?", "crit": {"billing": "payments", "tech": "bugs"}},
