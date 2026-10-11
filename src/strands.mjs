@@ -36,6 +36,26 @@ export const STRANDS_DEFAULT_REVISION = "31a83e0244b26d939ae33f87189d6c8204003e5
 export const STRANDS_DEFAULT_FILE = "onnx/model_quantized.onnx";
 export const STRANDS_Q4F16_FILE = "onnx/model_q4f16.onnx";
 
+/**
+ * Named checkpoints. Temperatures are NOT stored here: every checkpoint
+ * ships them in strands_decider_config.json (hobson_config.json on v19) and
+ * createStrandsDecider reads that file at load time — adding a checkpoint is
+ * an entry here plus a model/revision pin, no runtime change.
+ */
+export const STRANDS_VARIANTS = {
+  "hobson-v19": {
+    model: STRANDS_DEFAULT_MODEL,
+    revision: STRANDS_DEFAULT_REVISION,
+    description: "2B qwen3.5 torso, 1.8 GB q8 (the default)",
+  },
+  "qwen3.5-v1": {
+    model: "warsang/strands-decider-2b-qwen3v1-web",
+    revision: "5a5c936ac501379211b64181239301c95e2675d1",
+    description: "2B qwen3.5 torso, 3.7 GB fp16 (exported by "
+      + "export/strands-decider/; quantization pending — see RESUME.md)",
+  },
+};
+
 /** Reference calibration from the checkpoint's hobson_config.json. */
 export const STRANDS_TEMPERATURE = 0.9627721607677362;
 export const STRANDS_TEMPERATURE_BY_KIND = {
@@ -522,6 +542,7 @@ export async function createStrandsDecider({
   tokenizerRevision = null,
   calibrationModel = null,
   calibrationRevision = null,
+  variant = null,
   wasmPaths = null,
   device = "auto",
   sessionFactory = null,
@@ -533,6 +554,20 @@ export async function createStrandsDecider({
   ordinalSmoothing = null,
   scope = globalThis,
 } = {}) {
+  // Named checkpoint shortcut: {variant: "qwen3.5-v1"} sets model/revision
+  // (and the browser graph file) for that entry of STRANDS_VARIANTS.
+  if (variant) {
+    const v = STRANDS_VARIANTS[variant];
+    if (!v) {
+      throw new TypeError(
+        `strands: unknown variant "${variant}" (${Object.keys(STRANDS_VARIANTS).join(", ")})`);
+    }
+    const isDefault = model === STRANDS_DEFAULT_MODEL && revision === STRANDS_DEFAULT_REVISION;
+    if (isDefault) {
+      model = v.model;
+      revision = v.revision ?? null;
+    }
+  }
   const ortMod = ort ?? (await import("onnxruntime-web"));
   const tf = transformers ?? (await import("@huggingface/transformers"));
   if (wasmPaths) {

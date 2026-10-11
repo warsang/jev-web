@@ -14,3 +14,4 @@ export/**/base/
 export/**/ckpt/
 export/**/merged/
 __pycache__
+TWEET.txt

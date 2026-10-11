@@ -10,10 +10,11 @@ calibrated probability distribution per question comes back from a **single
 forward pass**. No server, no API keys, no network calls after the weights are
 cached.
 
-Three model families ship today — open-jev (fused DeBERTa graph), Laya
+Seven model families ship today — open-jev (fused DeBERTa graph), Laya
 (ModernBERT encoder + typed head), Strands Decider 2B (Qwen torso + pointer
 head), Bekko System One v0 (Ettin cross-encoder), Decision 2.0 (Qwen3 +
-candidate head), and Kev (Qwen3 + pointer head) — behind one registry:
+candidate head), Kev (Qwen3 + pointer head), and Vega 0.8B (frozen Qwen3.5
+torso + latent decision-physics engine) — behind one registry:
 `createDecisionRuntime({ family, fallback })`.
 
 This is a generic runtime, not a classifier for any particular domain. You bring
@@ -344,7 +345,20 @@ Checkpoint compatibility (verified against the 2026-10-09 drop):
 
 A new browser-eligible checkpoint needs an ONNX export plus a model/revision
 repin — no runtime code change (`export/strands-decider/` documents the
-pipeline and its browser-feasibility gate). Caveat: the E2B model card reports
+pipeline and its browser-feasibility gate). Named checkpoints are addressed
+through `STRANDS_VARIANTS` — temperatures are never baked into a variant,
+they ship with the checkpoint:
+
+```js
+const decider = await createStrandsDecider({ variant: "qwen3.5-v1" }); // the newer Qwen torso
+const decider2 = await createStrandsDecider();                        // hobson-v19, the default
+```
+
+`qwen3.5-v1` currently ships the exact fp16 graph (~3.7 GB) because dynamic
+q8 fails shape-inference on this graph's export metadata and the weight-only
+path drifts on the GatedDeltaNet delta rule (see
+`export/strands-decider/RESUME.md`), so it stays an opt-in until a quantized
+build lands. Caveat: the E2B model card reports
 a faulty GPU kernel path for *multi-question* yes/no answers before an upstream
 attention fix; this runtime batches every question into one forward pass, so
 validate multi-question parity before pinning E2B as a default.

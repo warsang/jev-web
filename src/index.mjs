@@ -51,6 +51,7 @@ export {
   STRANDS_MAX_QUESTION_FRACTION,
   STRANDS_KIND,
   STRANDS_CONFIG_FILES,
+  STRANDS_VARIANTS,
 } from "./strands.mjs";
 export {
   createBekkoDecider,

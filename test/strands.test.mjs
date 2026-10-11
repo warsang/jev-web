@@ -24,6 +24,9 @@ import {
   STRANDS_ORDINAL_SMOOTHING,
   STRANDS_DEFAULT_MAX_LEN,
   STRANDS_CONFIG_FILES,
+  STRANDS_VARIANTS,
+  STRANDS_DEFAULT_MODEL,
+  STRANDS_DEFAULT_REVISION,
 } from "../src/strands.mjs";
 import { softmaxWithTemperature } from "../src/answers.mjs";
 
@@ -549,5 +552,51 @@ test("createStrandsDecider rejects bad questions before touching the network", a
   await assert.rejects(
     decider.decide("s", [{ type: "choice", instructions: "x", options: ["only"] }]),
     /at least 2 options/,
+  );
+});
+
+// ---------------------------------------------------------------------------
+// Named checkpoint variants
+// ---------------------------------------------------------------------------
+
+test("STRANDS_VARIANTS pins both checkpoints without temperatures", () => {
+  assert.equal(STRANDS_VARIANTS["hobson-v19"].model, STRANDS_DEFAULT_MODEL);
+  assert.equal(STRANDS_VARIANTS["qwen3.5-v1"].model, "warsang/strands-decider-2b-qwen3v1-web");
+  for (const [id, v] of Object.entries(STRANDS_VARIANTS)) {
+    assert.equal(typeof v.description, "string", `${id}: has a description`);
+    // calibration is never baked into a variant: it ships with the checkpoint
+    assert.ok(!("temperature" in v) && !("temperaturesByKind" in v), `${id}: no baked temps`);
+  }
+});
+
+test("createStrandsDecider resolves the variant and keeps explicit models", async () => {
+  const ort = fakeOrt();
+  const transformers = { AutoTokenizer: { from_pretrained: async () => fakeTokenizer() } };
+  const server = configServer({});
+  const seen = [];
+  const sessionFactory = async (url) => { seen.push(url); return ort.InferenceSession.create(url, {}); };
+
+  const byVariant = await createStrandsDecider({
+    ort, transformers, device: "wasm", sessionFactory, fetchImpl: server.fetchImpl,
+    variant: "qwen3.5-v1",
+  });
+  assert.equal(byVariant.info.model, STRANDS_VARIANTS["qwen3.5-v1"].model);
+  assert.equal(byVariant.info.revision, STRANDS_VARIANTS["qwen3.5-v1"].revision,
+    "the variant's pinned revision is used");
+  assert.ok(seen[0].includes(STRANDS_VARIANTS["qwen3.5-v1"].model));
+
+  const byExplicit = await createStrandsDecider({
+    ort, transformers, device: "wasm", sessionFactory, fetchImpl: server.fetchImpl,
+    variant: "qwen3.5-v1", model: "my-org/my-export", revision: "abc",
+  });
+  assert.equal(byExplicit.info.model, "my-org/my-export", "explicit model beats the variant");
+  assert.equal(byExplicit.info.revision, "abc");
+
+  await assert.rejects(
+    createStrandsDecider({
+      ort, transformers, device: "wasm", sessionFactory, fetchImpl: server.fetchImpl,
+      variant: "nope",
+    }),
+    /unknown variant "nope" \(hobson-v19, qwen3\.5-v1\)/,
   );
 });
