@@ -85,7 +85,7 @@ export const DECISION3_VARIANTS = {
   },
   nano: {
     model: "warsang/d3-nano-web",
-    revision: null,
+    revision: "83c71ce35bc575cb387d4ea435628624e90c246b",
     maxLength: 8192,
     description: "2.21B, multimodal, the largest browser-class d3",
   },

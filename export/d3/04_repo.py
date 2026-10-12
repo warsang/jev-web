@@ -32,8 +32,11 @@ def main():
     if not os.path.exists(f"{EXPORT}/torso_fp16.onnx"):
         raise SystemExit("torso_fp16.onnx missing — run 01_export_torso.py first")
 
-    subprocess.run([sys.executable, os.path.join(DIR, "03_parity.py"), "torso_fp16.onnx"],
-                   check=True)
+    if not os.environ.get("D3_SKIP_PARITY"):
+        # Skip only when 03_parity.py has already run on this exact graph
+        # (used for the heavy d3-nano export to avoid a second reference load).
+        subprocess.run([sys.executable, os.path.join(DIR, "03_parity.py"), "torso_fp16.onnx"],
+                       check=True)
     summary = json.load(open(f"{EXPORT}/parity-torso_fp16.onnx.json"))
 
     for name in ("torso_fp16.onnx", "torso_fp16.onnx.data", "readout.onnx"):

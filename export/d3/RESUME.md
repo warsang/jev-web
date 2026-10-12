@@ -9,13 +9,18 @@ through the real jev-web runtime:
 
 | check | result |
 |---|---|
-| in-process, wrapper vs the runtime's noncausal path | max diff **0.00e+00** (edge + lite) |
-| in-process, fp16 wrapper vs fp32 wrapper | max last-hidden diff **4.7e-03** (edge), **9.8e-03** (lite) |
-| ONNX fp16 torso+readout vs reference (6 questions) | probs ≤ **1.18e-02** (edge), **4.85e-03** (lite), argmax **6/6** |
+| in-process, wrapper vs the runtime's noncausal path | max diff **0.00e+00** (all three) |
+| in-process, fp16 wrapper vs fp32 wrapper | max last-hidden diff **4.7e-03** (edge), **9.8e-03** (lite), **1.14e-02** (nano) |
+| ONNX fp16 torso+readout vs reference (6 questions) | probs ≤ **1.18e-02** (edge), **4.85e-03** (lite), **5.47e-04** (nano), argmax **6/6** each |
 | real JS runtime vs reference (fixtures, fp16 graphs) | probs ≤ **1.18e-02**, prompt bytes **identical** |
 
 `final/` sizes: edge 1.06 GB (torso 995 MB), lite 1.68 GB (torso 1.59 GB),
-nano ~4.4 GB (torso, fp16).
+nano 3.94 GB (torso 3.76 GB as fp16 + external data).
+
+Uploaded and pinned: `warsang/d3-edge-web` @
+`117fb255e630667ae1736666497e8a1c69c7a066`,
+`warsang/d3-lite-web` @ `8a0d19d2c23d852f138719a5f6a670635c42b1f7`,
+`warsang/d3-nano-web` @ `83c71ce35bc575cb387d4ea435628624e90c246b`.
 
 Two runtime generations ship in the collection: d3-edge/d3-lite install a mask
 hook (`enable_noncausal_full_attention`), while d3-nano's runtime runs its own
