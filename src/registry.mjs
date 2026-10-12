@@ -1,10 +1,12 @@
 /**
  * registry.mjs — multi-family runtime for JEV-style typed-decision models.
  *
- * jev-web ships three families today — open-jev (fused DeBERTa graph), Laya
- * (ModernBERT encoder + typed head), Strands Decider 2B (Qwen3.5/Gemma4 torso
- * + pointer head), Bekko System One v0 (cross-encoder), and Decision 2.0 (Qwen3 +
- * candidate head) — and any third party can add its own without touching
+ * jev-web ships nine families today — open-jev (fused DeBERTa graph), Laya
+ * (ModernBERT encoder + typed head), Strands Decider 2B (Qwen torso + pointer
+ * head), Bekko System One v0 (cross-encoder), Decision 2.0 (Qwen3 + candidate
+ * head), Kev (Qwen3 + pointer head), Vega 0.8B (frozen Qwen3.5 torso + latent
+ * physics engine), clef (Qwen3 + joint schema head), and Decision 3.0 (d3
+ * code readout) — and any third party can add its own without touching
  * core:
  *
  *   registerDecisionFamily("my-model", {
@@ -55,6 +57,18 @@ import {
   VEGA_DEFAULT_MODEL,
   VEGA_DEFAULT_REVISION,
 } from "./vega.mjs";
+
+import {
+  createClefDecider,
+  CLEF_DEFAULT_MODEL,
+  CLEF_DEFAULT_REVISION,
+} from "./clef.mjs";
+
+import {
+  createDecision3Decider,
+  DECISION3_DEFAULT_MODEL,
+  DECISION3_DEFAULT_REVISION,
+} from "./decision3.mjs";
 
 const families = new Map();
 
@@ -133,6 +147,22 @@ registerDecisionFamily("vega", {
     revision: VEGA_DEFAULT_REVISION,
   },
   create: createVegaDecider,
+});
+
+registerDecisionFamily("clef", {
+  defaults: {
+    model: CLEF_DEFAULT_MODEL,
+    revision: CLEF_DEFAULT_REVISION,
+  },
+  create: createClefDecider,
+});
+
+registerDecisionFamily("decision3", {
+  defaults: {
+    model: DECISION3_DEFAULT_MODEL,
+    revision: DECISION3_DEFAULT_REVISION,
+  },
+  create: createDecision3Decider,
 });
 
 /**

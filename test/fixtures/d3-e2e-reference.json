@@ -1,0 +1,165 @@
+[
+  {
+    "name": "mixed",
+    "state": "Our checkout is down and customers can't pay. The deploy broke production and the on-call is asleep.",
+    "questions": {
+      "route": {
+        "type": "choice",
+        "instructions": "Which team should handle this?",
+        "options": [
+          "billing",
+          "engineering",
+          "other"
+        ],
+        "criteria": {
+          "billing": "Payments, refunds and charges",
+          "engineering": "Bugs and outages",
+          "other": null
+        }
+      },
+      "refund": {
+        "type": "noul",
+        "instructions": "Is the customer asking for a refund?"
+      },
+      "reason": {
+        "type": "noul",
+        "instructions": "Is the message about a payment problem?",
+        "criteria": {
+          "false": "No payment signal.",
+          "true": "A payment signal is present."
+        }
+      },
+      "urgency": {
+        "type": "score",
+        "instructions": "How urgent is this?",
+        "options": [
+          "Routine",
+          "Soon",
+          "Today",
+          "Immediately"
+        ]
+      }
+    },
+    "perQuestion": {
+      "route": {
+        "keys": [
+          "billing",
+          "engineering",
+          "other"
+        ],
+        "probs": [
+          0.03329300507903099,
+          0.8479441404342651,
+          0.11876276880502701
+        ]
+      },
+      "refund": {
+        "keys": [
+          "false",
+          "true"
+        ],
+        "probs": [
+          0.6878663897514343,
+          0.3121335208415985
+        ]
+      },
+      "reason": {
+        "keys": [
+          "false",
+          "true"
+        ],
+        "probs": [
+          0.26677417755126953,
+          0.7332258224487305
+        ]
+      },
+      "urgency": {
+        "keys": [
+          "0",
+          "1",
+          "2",
+          "3"
+        ],
+        "probs": [
+          0.11335787177085876,
+          0.2813784182071686,
+          0.18757179379463196,
+          0.4176918864250183
+        ]
+      }
+    }
+  },
+  {
+    "name": "json-state",
+    "state": {
+      "order": 42,
+      "product": "blender",
+      "paid": [
+        "card",
+        19.5
+      ]
+    },
+    "questions": {
+      "payment": {
+        "type": "choice",
+        "instructions": "How was it paid?",
+        "options": [
+          "card",
+          "cash",
+          "gift card"
+        ],
+        "criteria": {
+          "card": null,
+          "cash": null,
+          "gift card": "Store gift card"
+        }
+      }
+    },
+    "perQuestion": {
+      "payment": {
+        "keys": [
+          "card",
+          "cash",
+          "gift card"
+        ],
+        "probs": [
+          0.8963181972503662,
+          0.021222300827503204,
+          0.08245942741632462
+        ]
+      }
+    }
+  },
+  {
+    "name": "long-state",
+    "state": "Support log line with filler tokens to pad the state. Support log line with filler tokens to pad the state. Support log line with filler tokens to pad the state. Support log line with filler tokens to pad the state. Support log line with filler tokens to pad the state. Support log line with filler tokens to pad the state. Support log line with filler tokens to pad the state. Support log line with filler tokens to pad the state. Support log line with filler tokens to pad the state. Support log line with filler tokens to pad the state. Support log line with filler tokens to pad the state. Support log line with filler tokens to pad the state. Support log line with filler tokens to pad the state. Support log line with filler tokens to pad the state. Support log line with filler tokens to pad the state. Support log line with filler tokens to pad the state. Support log line with filler tokens to pad the state. Support log line with filler tokens to pad the state. Support log line with filler tokens to pad the state. Support log line with filler tokens to pad the state. ",
+    "questions": {
+      "severity": {
+        "type": "score",
+        "instructions": "How severe is this?",
+        "options": [
+          "Cosmetic",
+          "Annoying",
+          "Severe",
+          "Outage"
+        ]
+      }
+    },
+    "perQuestion": {
+      "severity": {
+        "keys": [
+          "0",
+          "1",
+          "2",
+          "3"
+        ],
+        "probs": [
+          0.19931674003601074,
+          0.6026365756988525,
+          0.023573268204927444,
+          0.17447349429130554
+        ]
+      }
+    }
+  }
+]

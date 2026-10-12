@@ -6,12 +6,10 @@
 // requests through the Performance API.
 
 import {
-  createDecider,
+  createDecisionRuntime,
   detectWebGPU,
   resolveDevice,
   resolveDtype,
-  DEFAULT_MODEL,
-  DEFAULT_REVISION,
 } from "../src/index.mjs";
 import { parseAll } from "./naive.mjs";
 import { PRESETS } from "./presets.mjs";
@@ -57,25 +55,29 @@ let debounce = 0;
 const runHistory = [];
 
 // URL state: ?preset=negation links straight to a scenario so a disagreement
-// between the model and the rules can be pointed at directly.
+// between the model and the rules can be pointed at directly; ?model=<key>
+// links straight to a decider family (so a demo link can pick one).
 function readUrlState() {
   const q = new URLSearchParams(location.search);
   const p = q.get("preset");
-  if (p && PRESETS.some((x) => x.id === p)) return p;
-  return PRESETS[0].id;
+  const m = q.get("model");
+  return {
+    preset: p && PRESETS.some((x) => x.id === p) ? p : PRESETS[0].id,
+    model: m && MODEL_CHOICES[m] ? m : null,
+  };
 }
 
 function syncUrl() {
   const active = [...$("presets").children].find((b) => b.getAttribute("aria-pressed") === "true");
   const id = active?.dataset.id ?? PRESETS[0].id;
+  const params = new URLSearchParams();
+  if ($("model").value !== "open-jev") params.set("model", $("model").value);
+  if (id !== PRESETS[0].id) params.set("preset", id);
+  const qs = params.toString();
   // globalThis.history explicitly: a bare `history` in this module is exactly
   // the name that got shadowed before, and a wrong answer here should never be
   // able to take the inference path down with it.
-  globalThis.history.replaceState(
-    null,
-    "",
-    id === PRESETS[0].id ? location.pathname + location.hash : `?preset=${id}${location.hash}`,
-  );
+  globalThis.history.replaceState(null, "", (qs ? `?${qs}` : location.pathname) + location.hash);
 }
 
 // ── network monitor (real requests, via the Performance API) ───────────
@@ -363,6 +365,8 @@ async function run() {
   if (!decider || running) return;
   running = true;
   const warmBefore = net.warm;
+  const kind = selectedModel();
+  const tDecide = performance.now();
   try {
     let result;
     try {
@@ -382,7 +386,7 @@ async function run() {
         $("typed-when").textContent = "WebGPU failed — rebuilding on WASM…";
         $("typed-when").className = "pill warn";
         decider.dispose?.();
-        const built = await buildDeciderResilient("wasm", WASM_DTYPE_LADDER, (dtype, op) => {
+        const built = await buildDeciderResilient("wasm", wasmLadder(kind), (dtype, op) => {
           setNotice(
             `This browser's ONNX runtime cannot execute ${op}, which the q4 weights need. ` +
             `Retrying with ${dtype} — a bigger download, but it will run.`,
@@ -397,14 +401,20 @@ async function run() {
     }
     renderTyped(result, qs);
 
-    const ms = result.timings?.totalMs ?? 0;
-    $("typed-when").textContent = `${ms} ms · 1 pass · ${qs.length} question${qs.length === 1 ? "" : "s"}`;
+    // a family that reports no timings still gets an honest wall-clock number
+    const ms = result.timings?.totalMs ?? Math.round(performance.now() - tDecide);
+    // the split Vega export reads the state once per question; the other
+    // families batch every question into one forward pass
+    const passes = decider.info.format === "split" ? qs.length : 1;
+    $("typed-when").textContent =
+      `${ms} ms · ${passes} pass${passes === 1 ? "" : "es"} · `
+      + `${qs.length} question${qs.length === 1 ? "" : "s"}`;
     $("typed-when").className = "pill good";
 
     runHistory.push(ms);
     if (runHistory.length > 40) runHistory.shift();
     $("m-latency").textContent = `${ms} ms`;
-    $("m-passes").textContent = "1";
+    $("m-passes").textContent = String(passes);
     $("m-questions").textContent = String(qs.length);
     $("mx-latency").textContent = `~${ms} ms`;
     flash($("m-latency"));
@@ -459,10 +469,10 @@ const BROKEN_DEVICE_KEY = "jev-web.brokenDevice";
 const noteBrokenDevice = (d) => { try { sessionStorage.setItem(BROKEN_DEVICE_KEY, d); } catch { /* private mode */ } };
 const readBrokenDevice = () => { try { return sessionStorage.getItem(BROKEN_DEVICE_KEY); } catch { return null; } };
 
-async function buildDecider(device, dtype) {
-  return createDecider({
-    model: DEFAULT_MODEL,
-    revision: DEFAULT_REVISION,
+async function buildDecider(device, dtype, kind = selectedModel()) {
+  return createDecisionRuntime({
+    family: kind.family,
+    variant: kind.variant,
     device,
     dtype,
     onProgress: (p) => {
@@ -477,17 +487,42 @@ async function buildDecider(device, dtype) {
   });
 }
 
+// ── model choices ──────────────────────────────────────────────────────
+// Every family the package registers can run here through the same
+// createDecisionRuntime contract; the select lists them lightest-first.
+// `dtypes` marks the families whose export ships several quantizations
+// (only open-jev today); the others carry their dtype in the export.
+const MODEL_CHOICES = {
+  "open-jev": { family: "open-jev", dtypes: true },
+  bekko: { family: "bekko" },
+  kev: { family: "kev" },
+  laya: { family: "laya" },
+  decision2: { family: "decision2" },
+  "vega-q8": { family: "vega", variant: "q8" },
+  clef: { family: "clef" },
+  decision3: { family: "decision3" },
+  "vega-fp16": { family: "vega" },
+  "strands-decider": { family: "strands-decider" },
+};
+
+function selectedModel() {
+  return MODEL_CHOICES[$("model").value] ?? MODEL_CHOICES["open-jev"];
+}
+
 // Only fp32/fp16/q4/q4f16 exist for the reference export — there is no q8 —
 // so a WASM fallback that lands on a dtype the active ORT build cannot execute
 // must escalate rather than give up. Smallest first: q4 is 477 MB and fp32 is
 // 1065 MB, so the expensive download is a last resort, not the default.
 const WASM_DTYPE_LADDER = ["q4", "fp32"];
+// The q8 weights carry their own dtype; there is nothing to escalate.
+const wasmLadder = (kind) => (kind.dtypes ? WASM_DTYPE_LADDER : [null]);
 
 async function buildDeciderResilient(device, dtypes, onRetry) {
   let lastErr;
+  const kind = selectedModel();
   for (const dtype of dtypes) {
     try {
-      return { decider: await buildDecider(device, dtype), dtype };
+      return { decider: await buildDecider(device, dtype, kind), dtype };
     } catch (err) {
       if (!isUnsupportedOp(err)) throw err;
       lastErr = err;
@@ -505,6 +540,7 @@ async function load() {
   $("error").hidden = true;
   $("progress").hidden = false;
   const t0 = performance.now();
+  const kind = selectedModel();
 
   let wanted = $("device").value;
   // A device that already failed this session never gets chosen again.
@@ -512,7 +548,7 @@ async function load() {
 
   try {
     try {
-      decider = await buildDecider(wanted, $("dtype").value);
+      decider = await buildDecider(wanted, $("dtype").value, kind);
     } catch (err) {
       // The model itself may fail to load on WebGPU. Rebuild on WASM rather
       // than showing a dead page.
@@ -526,7 +562,7 @@ async function load() {
         decider?.dispose?.();
         decider = null;
         $("progress-meta").textContent = "WebGPU unavailable, retrying on WASM…";
-        const built = await buildDeciderResilient("wasm", WASM_DTYPE_LADDER, (dtype, op) => {
+        const built = await buildDeciderResilient("wasm", wasmLadder(kind), (dtype, op) => {
           $("progress-meta").textContent = `this ORT build has no ${op} kernel — retrying with ${dtype}…`;
           setNotice(
             `This browser's ONNX runtime cannot execute ${op}, which the ${dtype} weights need. ` +
@@ -544,7 +580,15 @@ async function load() {
     $("model-state").textContent = "model ready";
     $("model-state").className = "pill good";
     refreshInfoLine();
-    if (i.device === "wasm" && !readBrokenDevice()) {
+    if (i.format === "split") {
+      if ($("notice").hidden) {
+        setNotice(
+          "Vega q8 runs on WebAssembly by design — its 8-bit weights have no WebGPU kernel — "
+          + "and reads the state once per question, so expect a few seconds per question.",
+          "good",
+        );
+      }
+    } else if (i.device === "wasm" && !readBrokenDevice()) {
       setNotice("Running on WASM (CPU) — no usable WebGPU here, so expect higher latency.");
     }
     $("run").disabled = false;
@@ -570,9 +614,14 @@ let loadedSecs = null;
 function refreshInfoLine() {
   if (!decider) return;
   const i = decider.info;
+  const name = i.model ? `${i.model}@${String(i.revision ?? "main").slice(0, 8)}` : (i.family ?? "model");
+  const bits = [name, i.device].filter(Boolean);
+  if (i.dtype) bits.push(String(i.dtype));
+  if (i.family === "vega") bits.push(i.format === "split" ? "split q8" : "fused fp16");
+  if (i.adapters?.length) bits.push(`adapters: ${i.adapters.join(", ")}`);
+  if (Number.isFinite(i.temperature)) bits.push(`temperature ${i.temperature}`);
   $("info").textContent =
-    `Loaded in ${loadedSecs ?? "—"}s — ${i.model}@${(i.revision ?? "main").slice(0, 8)} · ` +
-    `${i.device}/${i.dtype} · temperature ${i.temperature} (${i.configSource}). ` +
+    `Loaded in ${loadedSecs ?? "—"}s — ${bits.join(" · ")}. ` +
     `Cached by the browser: reloads and offline visits are instant.`;
 }
 
@@ -582,15 +631,36 @@ function shortErr(err) {
   return line.replace(/\s+/g, " ").trim().slice(0, 180) || m.slice(0, 180);
 }
 
+function clearLoadedModel() {
+  if (!decider) return;
+  decider = null;
+  $("load").disabled = false;
+  $("load").textContent = "Load model";
+  $("run").disabled = true;
+  $("model-state").textContent = "settings changed — reload";
+  $("model-state").className = "pill";
+}
+
+// the 8-bit split Vega export carries its own dtype; the selector does not apply
+function syncModelControls() {
+  const kind = selectedModel();
+  $("dtype").disabled = !kind.dtypes;
+  if (!kind.dtypes) $("dtype").value = "auto";
+}
+
 $("load").onclick = load;
 $("run").onclick = run;
-$("device").onchange = () => { if (decider) { decider = null; $("load").disabled = false; $("load").textContent = "Load model"; $("model-state").textContent = "settings changed — reload"; } };
-$("dtype").onchange = $("device").onchange;
+$("device").onchange = clearLoadedModel;
+$("dtype").onchange = clearLoadedModel;
+$("model").onchange = () => { syncModelControls(); clearLoadedModel(); syncUrl(); };
 
 // ── boot ───────────────────────────────────────────────────────────────
 (async () => {
+  const urlState = readUrlState();
+  if (urlState.model) $("model").value = urlState.model; // ?model= before the controls sync
+  syncModelControls();
   renderQuestions();
-  loadPreset(readUrlState());
+  loadPreset(urlState.preset);
 
   // Report the resolved backend before anyone spends 340 MB finding out.
   // Statically imported on purpose: a dynamic import of a module that is also

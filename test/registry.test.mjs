@@ -33,6 +33,10 @@ test("built-in families are registered", () => {
   assert.equal(getDecisionFamily("decision2").create.name, "createDecision2Decider");
   assert.ok(ids.includes("vega"));
   assert.equal(getDecisionFamily("vega").create.name, "createVegaDecider");
+  assert.ok(ids.includes("clef"));
+  assert.equal(getDecisionFamily("clef").create.name, "createClefDecider");
+  assert.ok(ids.includes("decision3"));
+  assert.equal(getDecisionFamily("decision3").create.name, "createDecision3Decider");
 });
 
 test("registerDecisionFamily validates descriptors", () => {

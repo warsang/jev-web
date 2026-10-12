@@ -34,6 +34,13 @@ export function normalizeQuestions(questions) {
         throw new TypeError(`questions[${i}]: score needs 2-10 ordered levels`);
       }
     }
-    return { type, instructions, options, ...(q?.criteria !== undefined ? { criteria: q.criteria } : {}) };
+    return {
+      type,
+      instructions,
+      options,
+      ...(q?.criteria !== undefined ? { criteria: q.criteria } : {}),
+      // clef renders each field's ID into the record; other families ignore it.
+      ...(q?.id !== undefined ? { id: String(q.id) } : {}),
+    };
   });
 }

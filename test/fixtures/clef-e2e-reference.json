@@ -1,0 +1,67 @@
+{
+  "state": "Our checkout is down and customers can't pay. The deploy broke production and the on-call is asleep.",
+  "questions": {
+    "route": {
+      "type": "choice",
+      "instructions": "Which team should handle this?",
+      "criteria": {
+        "billing": "Payments, refunds and charges",
+        "engineering": "Bugs and outages",
+        "other": null
+      }
+    },
+    "refund": {
+      "type": "noul",
+      "instructions": "Is the customer asking for a refund?"
+    },
+    "urgency": {
+      "type": "score",
+      "instructions": "How urgent is this?",
+      "criteria": [
+        "Routine",
+        "Soon",
+        "Today"
+      ]
+    }
+  },
+  "inputTokens": 323,
+  "perQuestion": [
+    {
+      "questionId": "route",
+      "optionIds": [
+        "billing",
+        "engineering",
+        "other"
+      ],
+      "probs": [
+        0.042873844504356384,
+        0.8699172735214233,
+        0.08720889687538147
+      ]
+    },
+    {
+      "questionId": "refund",
+      "optionIds": [
+        "true",
+        "false"
+      ],
+      "probs": [
+        0.019250420853495598,
+        0.9807495474815369
+      ]
+    },
+    {
+      "questionId": "urgency",
+      "optionIds": [
+        "0",
+        "1",
+        "2"
+      ],
+      "probs": [
+        0.15983846783638,
+        0.3701637387275696,
+        0.46999773383140564
+      ]
+    }
+  ]
+}

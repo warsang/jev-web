@@ -10,11 +10,12 @@ calibrated probability distribution per question comes back from a **single
 forward pass**. No server, no API keys, no network calls after the weights are
 cached.
 
-Seven model families ship today — open-jev (fused DeBERTa graph), Laya
+Nine model families ship today — open-jev (fused DeBERTa graph), Laya
 (ModernBERT encoder + typed head), Strands Decider 2B (Qwen torso + pointer
 head), Bekko System One v0 (Ettin cross-encoder), Decision 2.0 (Qwen3 +
-candidate head), Kev (Qwen3 + pointer head), and Vega 0.8B (frozen Qwen3.5
-torso + latent decision-physics engine) — behind one registry:
+candidate head), Kev (Qwen3 + pointer head), Vega 0.8B (frozen Qwen3.5
+torso + latent decision-physics engine), clef (Qwen3 torso + joint schema
+head), and Decision 3.0 (d3 code readout) — behind one registry:
 `createDecisionRuntime({ family, fallback })`.
 
 This is a generic runtime, not a classifier for any particular domain. You bring
@@ -28,9 +29,19 @@ you give it.
 An interactive playground that runs this exact package: type a state, add typed
 questions, and watch the model and a hand-written keyword baseline answer
 side by side. It also counts your actual outbound requests, so the
-"offline / private / no server" claim is checkable rather than asserted.
+"offline / private / no server" claim is checkable rather than asserted. The
+model selector loads **any of the nine registered families** — open-jev by
+default, plus Bekko, Kev, Laya, Decision 2.0/3.0, Vega 0.8B (fused or the
+8-bit split export), clef and Strands Decider — and `?model=<family>`
+deep-links one.
 
 ![jev-web demo: typed decisions vs raw text parsing](docs/demo.gif)
+
+The picker is part of the demo: every family answers through the same
+`decide()` contract, and the pass counter reports each family's real cost
+(split Vega reads the state once per question, the others batch).
+
+![the demo's model picker answering with Bekko](docs/demo-model-picker.png)
 
 <sub>The frames are captured from the live demo at
 [warsang.github.io/jev-web](https://warsang.github.io/jev-web/) — site → typed
@@ -60,8 +71,9 @@ answers[0].confidence;               // 0.92
 
 That is the whole integration. The first call downloads the weights and the
 browser caches them; every later call — and every later visit, including
-offline — is local. **Zero dependencies**: `@huggingface/transformers` is an
-optional peer, imported lazily.
+offline — is local. **Zero bundled dependencies**: `onnxruntime-web` is a peer
+the package manager installs, `@huggingface/transformers` is an optional peer
+imported lazily, and hosts can inject either one.
 
 ## What comes back
 
@@ -149,9 +161,11 @@ The demo also tracks outbound requests through the Performance API: you will see
 npm i jev-web @huggingface/transformers
 ```
 
-`@huggingface/transformers` is an optional peer dependency (it is imported
-lazily). Hosts that already ship their own copy can inject it via
-`createDecider({ transformers })`.
+`@huggingface/transformers` is an optional peer (imported lazily); hosts that
+already ship their own copy can inject it via `createDecider({ transformers })`.
+`onnxruntime-web` is a regular peer, so `npm i jev-web` installs it; hosts with
+a custom runtime (local files, an older ORT, a worker) inject it via
+`createDecider({ ort })`.
 
 ## Use
 
@@ -227,7 +241,7 @@ tries the requested family and then any fallbacks, returning the shared contract
 ```js
 import { createDecisionRuntime, listDecisionFamilies } from "jev-web";
 
-listDecisionFamilies(); // ["open-jev", "laya", "strands-decider", "bekko", "decision2", "kev", "vega"]
+listDecisionFamilies(); // ["open-jev", "laya", "strands-decider", "bekko", "decision2", "kev", "vega", "clef", "decision3"]
 const runtime = await createDecisionRuntime({
   family: "strands-decider",
   fallback: ["laya", "open-jev"],
@@ -502,21 +516,23 @@ and download size. Lower-level helpers are exported for custom runtimes:
 
 `createVegaDecider(options)` runs [Vega 0.8B](https://huggingface.co/nandakishorm/vega-08b-public-intents)
 (by the Laya author): the language model is frozen and never trained — a 0.8B
-Qwen3.5 torso is read once (layers 13 and 19, span means pooled in-graph) and
-a 14M-parameter physics engine on top does the deciding. Each question drops a
-particle into a latent space whose landscape holds one Gaussian well per
-option; a damped symplectic integrator with a selective-SSM thermostat runs
-up to 12 steps (settled particles freeze), and the Boltzmann occupancy of the
-wells is the answer distribution:
+Qwen3.5 torso is read once (layers 13 and 19) and a 14M-parameter physics
+engine on top does the deciding. Each question drops a particle into a latent
+space whose landscape holds one Gaussian well per option; a damped symplectic
+integrator with a selective-SSM thermostat runs up to 12 steps (settled
+particles freeze), and the Boltzmann occupancy of the wells is the answer
+distribution:
 
 ```js
 import { createVegaDecider } from "jev-web";
 
 const decider = await createVegaDecider({
-  // defaults to warsang/vega-08b-web (revision pinned once the export repo
-  // lands — export/vega/05_upload.py prints the sha for VEGA_DEFAULT_REVISION)
+  // variant "fp16" (default): warsang/vega-08b-web, fused torso + engine, 1.7 GB
   onProgress: (p) => console.log(p.phase, p.loaded, p.total),
 });
+const q8 = await createVegaDecider({ variant: "q8" });
+// nvkudva/vega-onnx-q8: 8-bit embed + cut decoder + fp32 engine, 840 MB,
+// WebAssembly only (its MatMulNBits graphs have no WebGPU kernel)
 const { answers } = await decider.decide(stateText, questions);
 ```
 
@@ -525,16 +541,22 @@ Protocol implemented here (mirrors the reference `vega_common.py` / `vega_api.py
 - prompt `[BOS] Observation:\n<state>\n\nMeasurement (choice|score|boolean): <instructions>\nPossible outcomes:\n* <option> …\nOutcome:` — the state comes first so its span never sees the question
   (causal attention), and short states get a query-first prefix so the frozen
   model reads knowing what is asked;
-- two ONNX graphs: the frozen torso emits per-segment span means for the
+- perception: the torso emits per-segment span means for the
   state/question/final-token slots, every option, and 16 equal state chunks
-  (the engine's memory reader) from the one causal read; the engine graph
-  (unrolled integrator; the settle-freeze math is identical to the
-  reference's early exit) emits raw logits plus the particle physics;
+  (the engine's memory reader) from the one causal read — pooled in-graph in
+  the fused variant, in JS over the decoder's layer-13/19 hidden states in
+  the split one; the engine graph (unrolled integrator; the settle-freeze
+  math is identical to the reference's early exit) emits raw logits plus the
+  particle physics;
 - calibration is **thermal and checkpoint-driven**: `vega_config.json`'s
   `calibration.theta` maps the particle's physical state (residual kinetic
   energy, distance to the nearest well, steps used, option count) to a
   temperature per question type; `decider.info.calibrationSource` names the
-  file used;
+  file used. The split export's `vega_web.json` also carries the two gated
+  task adapters (`public_intents`, `typed_decisions`): the engine's per-
+  question gates pick the adapter whose `calibration` block (theta, conformal,
+  abstain, unbound) calibrates that answer, and the answers gain `adapter`
+  and `gate`;
 - answers carry the full distribution plus Vega's reliability machinery:
   a split-conformal `predictionSet`, an `abstain` flag at the chosen risk
   (`alpha` conformal level, `risk` abstention level, both per question type),
@@ -544,19 +566,143 @@ Protocol implemented here (mirrors the reference `vega_common.py` / `vega_api.py
   `choice` accepts `criteria` as `{label: description}`, and `score` uses the
   option texts as levels.
 
-Caveats: the checkpoint's gated task adapters are not shipped in v1 — the
-runtime uses the base engine, which is the source repo's default; the torso
-ships as the exact fp16 graph (~1.5 GB, the weight class of the strands 2B q8
-default) because q8 on this graph drifts on the GatedDeltaNet delta rule,
-with the measured q8 experiment available as an opt-in file; and the prompt
-window is the trained 73,728 tokens, so pass `maxLen` to cap a browser's
-read. The browser export repo (`warsang/vega-08b-web`, ~1.7 GB) is uploaded
-by `export/vega/05_upload.py`; the revision lands in `VEGA_DEFAULT_REVISION`.
+Variants (`variant`, or explicit `model`/`revision`/`format`):
+
+| variant | export | graphs | size |
+|---|---|---|---|
+| `fp16` (default) | `warsang/vega-08b-web` | fused fp16 torso + fp32 engine, span means pooled in-graph | ~1.7 GB |
+| `q8` | `nvkudva/vega-onnx-q8` (`v2/`) | 8-bit `embed_q8` + cut `decoder_q8` (layers 0–19, text M-RoPE positions, zeroed `past_*` state) + fp32 `engine` with both adapters; JS pools | ~840 MB |
+
+Caveats: the fused export's gated task adapters are not shipped in its v1 — it
+uses the base engine, the source repo's default; and that torso ships as the
+exact fp16 graph because q8 on the fused graph drifts on the GatedDeltaNet
+delta rule. The split export is text-only here (its vision encoder is not
+wired in), runs one decoder read per question, is refused — `RangeError` —
+rather than truncated when a state does not fit `maxLen`, and its checkpoints
+were verified end-to-end against the reference (`export/vega/06_verify_q8_export.py`:
+JS-vs-reference pooling exact, engine graph vs PyTorch 1.4e-6, argmax 3/3
+against the fp16 backbone). Both keep the trained 73,728-token window, so pass
+`maxLen` to cap a browser's read. The fused export repo (`warsang/vega-08b-web`,
+~1.7 GB) is uploaded by `export/vega/05_upload.py`; the revision lands in
+`VEGA_DEFAULT_REVISION`.
 
 Lower-level helpers are exported for custom runtimes:
 `buildVegaPrompt`, `packVegaBatch`, `packVegaChunks`, `vegaQuestionDef`,
 `vegaOptionTexts`, `vegaThermalFeatures`, `vegaThermalProbabilities`,
-`vegaAnswers`, `vegaOptionLabels`.
+`vegaAnswers`, `vegaOptionLabels`, `vegaJsonDumps`, `vegaRoute`,
+`vegaTextPositions`, `emptyVegaPast`, `poolVegaHidden`.
+
+## clef family (Qwen3 torso + joint schema head)
+
+`createClefDecider(options)` runs [clef-text-0.6b](https://huggingface.co/FluidInference/clef-text-0.6b)
+(Apache-2.0): a Qwen3-0.6B torso (LoRA merged) with Cloudflare's **joint schema
+head** — the whole record (state plus every question's schema) becomes one
+prompt, and the head decides every field in one joint pass. It is distilled
+from Cloudflare's clef-flash 9B (79.1 vs 88.2 mean across 12 held-out
+benchmarks) and ships Cloudflare's unchanged reference module
+(`joint_schema_model.py`).
+
+```js
+import { createClefDecider } from "jev-web";
+
+const decider = await createClefDecider({
+  // defaults to warsang/clef-text-0.6b-web @ pinned revision
+  onProgress: (p) => console.log(p.phase, p.loaded, p.total),
+});
+const { answers } = await decider.decide(stateText, questions);
+```
+
+Protocol implemented here (mirrors `encode_record` / `ClefModel`):
+
+- record `<|im_start|>system\n…<|im_end|>\n<|im_start|>user\nSTATE:\n<state>`
+  + `\n\nSCHEMA FIELDS:\n` + one block per question (`\nFIELD n\nID: …\nTYPE:
+  …\nINSTRUCTION: …\nALLOWED OPTIONS:\nOPTION n:
+  {"description":…,"option_id":…}\n…END FIELD\n`) + `<|im_end|>\n<|im_start|>
+  assistant\n<think>\n\n</think>\n\nJOINT SCHEMA DECISIONS:` — every piece
+  tokenized separately, the state truncated head-first to the window;
+- `choice` option keys are **sorted** like the reference's
+  `sorted(criteria.items())` (probabilities still come back keyed by your
+  labels); `noul` maps to the fixed `true`/`false` slots (default descriptions,
+  overridable under either `true/false` or `yes/no`); `score` levels map to
+  numeric keys `0..n-1` with a `legend`;
+- a question may carry an `id` — it is rendered as the field ID (default
+  `"0"`, `"1"`, …);
+- the head's evidence and field passes attend to the full hidden sequence, so
+  torso and head ship as **one fused ONNX graph**; span means (question spans,
+  option spans, the final token, and the tied-embedding lexical mean per
+  option) travel as pooling matrices — the Vega trick;
+- choice/score confidence is the top probability (the reference SystemOne
+  measure), not an entropy score.
+
+Lower-level helpers are exported for custom runtimes:
+`encodeClefRecord`, `packClefBatch`, `clefQuestionOptions`, `clefAnswers`,
+`renderClefContent`.
+
+Caveat: this family ships the **text-only** clef — images and videos (the
+multimodal clef checkpoints' processor path) are not part of the browser
+export. The fused fp16 graph needs an onnxruntime in the 1.31 generation
+(transformers.js 4.3 ships ORT-web 1.31 in the browser); hosts pinned to an
+older runtime can re-export the exact fp32 graph (2.7 GB) with
+`export/clef/01_export.py` and pass it as `file`.
+
+## Decision 3.0 family (d3 code readout)
+
+`createDecision3Decider(options)` runs the
+[vLLM Semantic Router Decision 3.0](https://huggingface.co/vllm-sr/d3-edge)
+collection (Apache-2.0): Decision 2.0's candidate head is replaced by a **code
+readout** — every option is printed under a single-token answer code (A…Z,
+AA…AZ, up to 255), one question is decided per forward pass, and a 255-way
+readout scores those codes at the last prompt position. d3-edge (0.59B,
+multimodal) scores **28.82** on the Jev Decision Index 0.3 public suite (+12
+over Decision 2.0's 0.6B).
+
+```js
+import { createDecision3Decider } from "jev-web";
+
+const decider = await createDecision3Decider({
+  // defaults to warsang/d3-edge-web @ pinned revision
+  onProgress: (p) => console.log(p.phase, p.loaded, p.total),
+});
+// or pick a larger sibling:
+// await createDecision3Decider({ variant: "lite" }); // 0.85B
+// await createDecision3Decider({ variant: "nano" }); // 2.21B
+const { answers } = await decider.decide(stateText, questions);
+```
+
+Protocol implemented here (mirrors `d3_format.py` / `d3_runtime.py`):
+
+- user prompt `State:\n<state>\n\nQuestion:\n<instructions>\n\nOptions:\nA:
+  <option>\nB: …\n\nReply with only the code of the best option.` wrapped in
+  the checkpoint's Qwen3.5 chat template with `add_generation_prompt` and
+  `enable_thinking=false` (the built-in rendering is byte-identical to the
+  template and kicks in when the runtime has no `apply_chat_template`);
+- the answer-code table comes from the checkpoint's `decision_config.json`
+  (falling back to the shipped A…Z / AA…ZZ list); questions run `batchSize`
+  (8) per forward pass, left-padded like the reference;
+- `choice` keys are the option labels with optional descriptions; `noul` maps
+  to the fixed `false`/`true` slots with overridable descriptions; `score`
+  takes 2–10 distinct levels, renders as bare option texts, and answers with
+  the expected level index, the reference entropy `confidence` and a `legend`;
+- two ONNX graphs ship: the torso (Qwen3.5 backbone with the reference
+  **non-causal full attention** — softmax layers see the whole prompt while the
+  GatedDeltaNet layers stay causal and padding-safe) emits the last prompt
+  token's hidden state, and a 255×d readout graph emits masked code logits
+  (fp32); the JS softmaxes them with the checkpoint temperature;
+- a prompt over `maxLen` raises a `RangeError` — like the reference, nothing
+  is truncated (`truncated` is always `false`).
+
+Caveats: the browser export is **text-only in v1** — the checkpoints'
+image/video inputs run through a separate vision tower that the two shipped
+graphs do not include; the exported window is capped by the browser budget
+(`maxLen`, 8192 default) rather than the checkpoint's uncapped `max_length`;
+and the fp16 torso needs an onnxruntime in the 1.31 generation (the same
+requirement as clef — transformers.js 4.3 ships ORT-web 1.31 in the browser).
+
+Lower-level helpers are exported for custom runtimes:
+`buildDecision3Prompt`, `decision3Messages`, `renderDecision3Chat`,
+`normalizeDecision3Question`, `decision3OptionTexts`,
+`decision3ProbsFromLogits`, `decision3Confidence`, `decision3Answers`,
+`packDecision3Batch`.
 
 ## Worker / thread
 
@@ -575,6 +721,8 @@ import { createDecider } from "jev-web";
 - `createDecider(options)` → open-jev family: `{ info, decide, decideMany, dispose }`
 - `createLayaDecider(options)` → Laya family: `{ info, decide, dispose }` (same `decide` contract)
 - `createStrandsDecider(options)` → Strands Decider family: `{ info, decide, dispose }` (same `decide` contract)
+- `createBekkoDecider(options)`, `createDecision2Decider(options)`, `createKevDecider(options)`,
+  `createVegaDecider(options)`, `createClefDecider(options)`, `createDecision3Decider(options)` → the same `decide` contract
 - `normalizeQuestions`, `buildDecisionInput`, `typedMarkerIds`, `answersFromScores`,
   `softmaxWithTemperature`, `resolveDevice`, `resolveDtype`, `detectWebGPU`,
   `loadModelConfig`, defaults (model/revision/temperature/caps).

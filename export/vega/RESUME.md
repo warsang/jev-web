@@ -90,3 +90,33 @@ engine (`onnx/engine.onnx`):
   engine, which is the source repo's default (`adapters="off"` parity).
 - The 73,728-token trained window stays in the config; hosts can pass
   `maxLen` to cap it.
+
+## Split 8-bit export (nvkudva/vega-onnx-q8) — supported 2026-10-12
+
+The runtime side lives in `src/vega.mjs` (`createVegaDecider({variant: "q8"})`),
+fixtures in `test/fixtures/vega-q8-protocol.json`
+(`make_q8_js_fixtures.py`) and the real-graph checks in
+`06_verify_q8_export.py` (graphs cached in `~/workspace/vega-q8`, 840 MB,
+wasm-only). Graph contracts it verified against the shipped files:
+
+- `embed_q8`: `input_ids -> inputs_embeds` (i64 [B,L] -> f32 [B,L,1024]);
+- `decoder_q8`: `inputs_embeds + attention_mask + position_ids[3,B,L]` (text:
+  `0..L-1` on all three rows) + 40 zeroed `past_*` inputs -> `h13`, `h19`
+  (the cut residual stream; the LM head/layers 20-23 never run);
+- `engine`: `feats[B,2,3,1024] + opts[B,K,1,1024] + opt_mask + qtype +
+  chunks[B,16,1024] + chunk_mask -> logits/kinetic/nearest/steps_used/gates[2]`
+  (fp32, both adapters in-graph as gates).
+
+Measured: JS pooling reproduces the reference `Perception._pooled_batch`
+exactly (0.0); the q8 engine graph matches the PyTorch engine 1.4e-6; final
+probabilities 1.9e-7. Against the fp16 backbone reference on the smoke prompts:
+argmax 3/3, max |Δp| 2.4e-3, KL <= 1.7e-5 — consistent with the export's own
+card (argmax preserved, mean KL 4.0e-04 on their 30-question set). The vision
+encoder is not wired in (text states only).
+
+The whole JS runtime was also run end-to-end in Node against the real graphs
+(wasm onnxruntime-web, all three sessions from the local cache): the printed
+prompt is byte-identical to the reference layout, and the choice smoke prompt
+returns p=[0.4532, 0.3956, 0.1512] vs the Python reference's
+[0.453, 0.396, 0.151] (argmax billing, gate ~1.5e-7 -> base calibration, the
+same route the reference takes).

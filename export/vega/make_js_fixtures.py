@@ -20,8 +20,10 @@ import numpy as np
 OUT = os.environ.get("STRANDS_OUT", os.path.expanduser("~/workspace/vega-export"))
 BASE = f"{OUT}/base"
 CKPT = f"{OUT}/ckpt"
+# this file lives at <repo>/export/vega/, the fixtures at <repo>/test/fixtures
 FIXTURES = os.path.join(
-    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "test", "fixtures")
+    os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+    "test", "fixtures")
 os.makedirs(FIXTURES, exist_ok=True)
 
 sys.path.insert(0, CKPT)

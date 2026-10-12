@@ -105,6 +105,27 @@ console.log(answers[0].noul, answers[0].probabilities); <span class="hint">// 0.
           <button class="btn primary" id="run" type="button" disabled>Decide</button>
           <button class="btn" id="load" type="button">Load model</button>
           <label class="select-wrap">
+            <span class="sr-only">model</span>
+            <select id="model">
+              <optgroup label="default">
+                <option value="open-jev">open-jev — fused DeBERTa-v3-large (~340 MB)</option>
+              </optgroup>
+              <optgroup label="light">
+                <option value="bekko">Bekko 17m — Ettin cross-encoder (29 MB)</option>
+                <option value="kev">Kev 0.6B — Qwen3 pointer head (~335 MB)</option>
+                <option value="laya">Laya — ModernBERT + typed head (~520 MB)</option>
+                <option value="decision2">Decision 2.0 — Qwen3 + candidate head (~610 MB)</option>
+                <option value="vega-q8">Vega 0.8B q8 — decision-physics engine (840 MB, wasm-only)</option>
+              </optgroup>
+              <optgroup label="heavy">
+                <option value="clef">clef 0.6B — joint schema head (fp16)</option>
+                <option value="decision3">Decision 3.0 d3-edge — 255-way code readout</option>
+                <option value="vega-fp16">Vega 0.8B fp16 — decision-physics engine (1.7 GB)</option>
+                <option value="strands-decider">Strands Decider 2B (~1.8 GB)</option>
+              </optgroup>
+            </select>
+          </label>
+          <label class="select-wrap">
             <span class="sr-only">device</span>
             <select id="device">
               <option value="auto">device: auto</option>
@@ -256,6 +277,8 @@ console.log(answers[0].noul, answers[0].probabilities); <span class="hint">// 0.
       <p class="note">
         <code>@huggingface/transformers</code> is an optional peer dependency (imported lazily); hosts that
         already ship their own copy can inject it via <code>createDecider({ transformers })</code>.
+        <code>onnxruntime-web</code> is a regular peer (installed with the package) and can likewise be
+        injected via <code>createDecider({ ort })</code>.
         This page runs on GitHub Pages, which cannot set COOP/COEP, so the ONNX runtime stays
         single-threaded; run <code>npm run dev</code> locally for the threaded WASM build.
       </p>
