@@ -1,6 +1,6 @@
 {
   "name": "jev-web",
-  "version": "0.9.1",
+  "version": "0.9.2",
   "description": "Run open-jev-, Laya-, Strands-Decider-, Bekko-, Decision-, Kev-, Vega-, clef-shaped typed-decision models in the browser: one state plus typed questions in, calibrated probabilities out.",
   "type": "module",
   "license": "MIT",
@@ -46,7 +46,7 @@
   },
   "peerDependencies": {
     "@huggingface/transformers": ">=3.0.0",
-    "onnxruntime-web": ">=1.17.0"
+    "onnxruntime-web": ">=1.17.0 || >=1.31.0-dev.0"
   },
   "peerDependenciesMeta": {
     "@huggingface/transformers": {

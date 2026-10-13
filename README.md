@@ -165,7 +165,9 @@ npm i jev-web @huggingface/transformers
 already ship their own copy can inject it via `createDecider({ transformers })`.
 `onnxruntime-web` is a regular peer, so `npm i jev-web` installs it; hosts with
 a custom runtime (local files, an older ORT, a worker) inject it via
-`createDecider({ ort })`.
+`createDecider({ ort })`. The peer range also accepts the `1.31.0-dev.*`
+builds `@huggingface/transformers` 4.3 pins — ORT 1.31 has no stable release
+yet, and the clef / Decision 3.0 fp16 graphs need that generation.
 
 ## Use
 
