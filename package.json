@@ -1,6 +1,6 @@
 {
   "name": "jev-web",
-  "version": "0.9.0",
+  "version": "0.9.1",
   "description": "Run open-jev-, Laya-, Strands-Decider-, Bekko-, Decision-, Kev-, Vega-, clef-shaped typed-decision models in the browser: one state plus typed questions in, calibrated probabilities out.",
   "type": "module",
   "license": "MIT",
