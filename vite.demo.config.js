@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { defineConfig } from "vite";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -5,10 +6,16 @@ import { fileURLToPath } from "node:url";
 // Static promo/demo site for the npm README. Deployed to GitHub Pages by
 // .github/workflows/pages.yml, so `base` has to match the project path.
 const here = path.dirname(fileURLToPath(import.meta.url));
+const pkg = JSON.parse(readFileSync(path.resolve(here, "package.json"), "utf8"));
 
 export default defineConfig({
   root: "demo",
   base: process.env.DEMO_BASE ?? "/jev-web/",
+  define: {
+    // The footer says which release the deployed page shows; reading it from
+    // package.json keeps the stamp honest without a second place to edit.
+    __JEV_WEB_VERSION__: JSON.stringify(pkg.version),
+  },
   build: {
     // Absolute, not "../dist-demo": a relative outDir depends on `root`, and
     // silently writes outside the repo when a config's root differs.

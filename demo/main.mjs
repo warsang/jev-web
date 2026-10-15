@@ -31,6 +31,13 @@ $("theme").onclick = () => {
   localStorage.setItem("jev-theme", next);
 };
 
+// ── release stamp ──────────────────────────────────────────────────────
+// Injected at build time from package.json (see vite.demo.config.js); the
+// `typeof` guard keeps the page working if the demo is served unstamped.
+$("app-version").textContent = typeof __JEV_WEB_VERSION__ === "string"
+  ? `jev-web v${__JEV_WEB_VERSION__}`
+  : "jev-web";
+
 // ── quickstart copy ────────────────────────────────────────────────────
 $("copy-quickstart").onclick = async (e) => {
   const text = $("quickstart").code.textContent.replace(/\s*$/, "");
@@ -385,7 +392,7 @@ async function run() {
         );
         $("typed-when").textContent = "WebGPU failed — rebuilding on WASM…";
         $("typed-when").className = "pill warn";
-        decider.dispose?.();
+        await decider.dispose?.();
         const built = await buildDeciderResilient("wasm", wasmLadder(kind), (dtype, op) => {
           setNotice(
             `This browser's ONNX runtime cannot execute ${op}, which the q4 weights need. ` +
@@ -559,7 +566,7 @@ async function load() {
           `Retrying on WASM — slower (tens of seconds per answer here, because this ` +
           `page cannot enable COOP/COEP for threads), still entirely on-device.`,
         );
-        decider?.dispose?.();
+        await decider?.dispose?.();
         decider = null;
         $("progress-meta").textContent = "WebGPU unavailable, retrying on WASM…";
         const built = await buildDeciderResilient("wasm", wasmLadder(kind), (dtype, op) => {

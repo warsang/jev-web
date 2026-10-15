@@ -16,7 +16,7 @@
       <div class="hero-top">
         <h1><span class="logo">jev&#8203;-web</span></h1>
         <div class="badges">
-          <span class="badge" title="No runtime dependencies — @huggingface/transformers is an optional peer">0 deps</span>
+          <span class="badge" title="No runtime dependencies — @huggingface/transformers and onnxruntime-web are optional peers">0 deps</span>
           <span class="badge ok" title="No server, no API key">no server</span>
           <span class="badge ok" title="Works after the one-time weight download">offline</span>
           <span class="badge ok" title="Nothing leaves the device">private</span>
@@ -273,12 +273,13 @@ console.log(answers[0].noul, answers[0].probabilities); <span class="hint">// 0.
 
     <section class="card" id="install">
       <div class="card-head"><h2>Install</h2></div>
-      <pre class="code"><code>npm i jev-web @huggingface/transformers</code></pre>
+      <pre class="code"><code>npm i jev-web @huggingface/transformers onnxruntime-web</code></pre>
       <p class="note">
-        <code>@huggingface/transformers</code> is an optional peer dependency (imported lazily); hosts that
-        already ship their own copy can inject it via <code>createDecider({ transformers })</code>.
-        <code>onnxruntime-web</code> is a regular peer (installed with the package) and can likewise be
-        injected via <code>createDecider({ ort })</code>.
+        jev-web itself ships <b>no runtime dependencies</b>: <code>@huggingface/transformers</code>
+        (tokenizer) and <code>onnxruntime-web</code> (runtime) are both <b>optional peers</b>. A host
+        that already ships its own copy — a self-hosted wasm build, a pinned version — installs
+        nothing extra and injects it instead via
+        <code>createDecider({ transformers, ort })</code>.
         This page runs on GitHub Pages, which cannot set COOP/COEP, so the ONNX runtime stays
         single-threaded; run <code>npm run dev</code> locally for the threaded WASM build.
       </p>
@@ -286,7 +287,7 @@ console.log(answers[0].noul, answers[0].probabilities); <span class="hint">// 0.
   </main>
 
   <footer class="wrap foot">
-    <span>MIT runtime · reference weights Apache-2.0</span>
+    <span><b id="app-version">jev-web</b> · MIT runtime · reference weights Apache-2.0</span>
     <span>
       <a href="https://github.com/warsang/jev-web" target="_blank" rel="noopener">github.com/warsang/jev-web</a>
       ·
