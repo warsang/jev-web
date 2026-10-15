@@ -16,7 +16,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - run: npm install --no-audit --no-fund
+      # npm ci: parity numbers depend on the locked ORT/transformers versions.
+      - run: npm ci --no-audit --no-fund
       # One real example per family, real pinned weights, probabilities
       # compared to parity/baselines.json. Families without a baseline skip;
       # a drift exits 1.
