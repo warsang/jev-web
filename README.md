@@ -776,7 +776,14 @@ TypeScript definitions for the whole surface ship in the package
 - `npm run parity` — runs one real example per family against its pinned
   checkpoints and diffs the answers against `parity/baselines.json`. It runs
   nightly (`.github/workflows/nightly.yml`); families without a baseline are
-  skipped, a drift exits non-zero.
+  skipped, a drift exits non-zero. The baselines cover every family but
+  `clef`: its fused fp16 graph loads only inside a browser (onnxruntime-node
+  rejects it at load, and the 1.4 GB graph does not fit onnxruntime-web's
+  wasm32 heap on a headless host), so that family reports SKIP for now. Two
+  other headless accommodations are worth knowing: `vega` is recorded from its
+  split q8 export — the fused fp16 export is 1.7 GB and likewise does not fit
+  the wasm32 heap — and `strands-decider` (1.8 GB) runs through native
+  onnxruntime-node, installed by the workflow under an npm alias.
 
 ## Demos
 
