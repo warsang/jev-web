@@ -17,12 +17,9 @@
 
 import { normalizeQuestions } from "./questions.mjs";
 import { answersFromScores } from "./answers.mjs";
-import { fetchCachedBytes, fetchOnnxExternalData } from "./laya.mjs";
+import { now, hfUrl, createSerialQueue } from "./util.mjs";
+import { fetchCachedBytes, fetchCachedJson, fetchOnnxExternalData } from "./fetch.mjs";
 import { resolveDtype } from "./config.mjs";
-
-const HF_BASE = "https://huggingface.co";
-const hfUrl = (model, revision, ...parts) =>
-  [HF_BASE, model, "resolve", revision, ...parts.filter(Boolean)].join("/");
 
 export const KEV_DEFAULT_MODEL = "onnx-community/kev-0.6b-ONNX";
 export const KEV_DEFAULT_REVISION = "5a827091b3d58fe4fdfc02a5a5b2ce364047d678";
@@ -82,29 +79,48 @@ function renderKevOption(question, label) {
 
 /**
  * Pack the state and normalized questions into one kev token sequence.
- * Returns { tokens, groups } where groups[i] holds the sequence indices of
- * question i's option `</opt>` tokens.
+ *
+ * Every question branch is built first and the state takes the leftover room,
+ * so all requested questions are always packed. The shared truncation
+ * contract applies: `truncated` is true iff user text was shortened. A branch
+ * that cannot fit `max_branch_tokens` throws `RangeError`, and so does a
+ * question set whose branches leave no room for the state delimiter at all
+ * (the state can shrink to zero tokens; the questions cannot).
+ *
+ * Returns { tokens, groups, truncated } where groups[i] holds the sequence
+ * indices of question i's option `</opt>` tokens.
  */
 export function packKevSequence({ stateText, questions, encode, delims, limits }) {
   const { state: STATE, question: Q, option_start: OPT, option_end: END, decide: DECIDE } = delims;
-  const stateIds = encode(stateText).slice(0, limits.max_state_tokens);
-  const tokens = [STATE, ...stateIds];
-  const groups = [];
-  let truncated = false;
 
+  const branches = [];
+  let branchTokens = 0;
   for (const q of questions) {
     const instrIds = encode(q.instructions);
     const spans = q.options.map((label) => [OPT, ...encode(renderKevOption(q, label)), END]);
     const branch = [Q, ...instrIds, ...spans.flat(), DECIDE];
     if (branch.length > limits.max_branch_tokens) {
-      throw new Error(
+      throw new RangeError(
         `kev: question branch too long (${branch.length} > ${limits.max_branch_tokens} tokens)`,
       );
     }
-    if (tokens.length + branch.length > limits.max_state_tokens) {
-      truncated = true;
-      break;
-    }
+    branches.push({ branch, instrIds, spans });
+    branchTokens += branch.length;
+  }
+
+  const stateIds = encode(stateText);
+  const stateRoom = limits.max_state_tokens - branchTokens - 1;
+  if (stateRoom < 0) {
+    throw new RangeError(
+      `kev: questions need ${branchTokens} tokens, which leaves no room within ` +
+      `max_state_tokens=${limits.max_state_tokens}`,
+    );
+  }
+  const keptState = stateIds.slice(0, stateRoom);
+  const truncated = keptState.length < stateIds.length;
+
+  const tokens = [STATE, ...keptState];
+  const groups = branches.map(({ branch, instrIds, spans }) => {
     const base = tokens.length;
     let cursor = 1 + instrIds.length;
     const ends = spans.map((s) => {
@@ -112,8 +128,8 @@ export function packKevSequence({ stateText, questions, encode, delims, limits }
       return base + cursor - 1; // index of this option's </opt>
     });
     tokens.push(...branch);
-    groups.push(ends);
-  }
+    return ends;
+  });
   return { tokens, groups, truncated };
 }
 
@@ -173,9 +189,15 @@ export async function createKevDecider({
     onProgress?.({ phase, file: p?.file ?? null, loaded: p?.loaded ?? null, total: p?.total ?? null });
 
   // Model config carries the kev protocol block (delimiters, ids, limits).
-  const cfgRes = await fetchImpl(configUrl ?? hfUrl(model, revision, "", "config.json"));
-  if (!cfgRes.ok) throw new Error(`kev: config fetch failed (${cfgRes.status})`);
-  const kevCfg = (await cfgRes.json()).kev ?? {};
+  let kevCfg;
+  try {
+    kevCfg = (await fetchCachedJson(
+      configUrl ?? hfUrl(model, revision, "", "config.json"),
+      { fetchImpl },
+    ))?.kev ?? {};
+  } catch (e) {
+    throw new Error(`kev: config fetch failed (${e?.message ?? e})`, { cause: e });
+  }
   const delimiters = { ...KEV_FALLBACK.delimiters, ...(kevCfg.delimiters ?? {}) };
   const limits = {
     max_state_tokens: kevCfg.max_state_tokens ?? KEV_FALLBACK.max_state_tokens,
@@ -231,65 +253,70 @@ export async function createKevDecider({
     }
   }
 
+  const info = {
+    family: "kev",
+    model,
+    revision,
+    device: activeDevice,
+    dtype: resolvedDtype,
+    tasks: ["choice", "noul", "score"],
+    limits,
+  };
+
+  // One session, one `decide()` at a time (a shared session is not safe for
+  // interleaved runs).
+  const queue = createSerialQueue();
+
+  const decideImpl = async (state, questions) => {
+    const t0 = now();
+    const normalized = normalizeQuestions(questions);
+    for (const [i, q] of normalized.entries()) {
+      if (q.options.length > limits.max_options) {
+        throw new TypeError(`questions[${i}]: kev supports at most ${limits.max_options} options`);
+      }
+    }
+    const stateText = renderKevContent(state);
+    const { tokens, groups, truncated } = packKevSequence({
+      stateText, questions: normalized, encode, delims, limits,
+    });
+
+    const n = tokens.length;
+    const inputIds = new ortMod.Tensor("int64", BigInt64Array.from(tokens, BigInt), [1, n]);
+    const attentionMask = new ortMod.Tensor("int64", new BigInt64Array(n).fill(1n), [1, n]);
+    const tRun = now();
+    const out = await session.run({ input_ids: inputIds, attention_mask: attentionMask });
+    const runMs = now() - tRun;
+    const outLogits = out.logits ?? out[Object.keys(out)[0]];
+    if (outLogits.dims.length !== 2 || outLogits.dims[0] !== 1 || outLogits.dims[1] !== n) {
+      throw new Error("kev: invalid model logits shape");
+    }
+    const scores = Array.from(outLogits.data, Number);
+    // One flat score list; groups map each question to its option positions.
+    const flat = [];
+    const flatGroups = groups.map((ends) => ends.map((pos) => {
+      flat.push(scores[pos]);
+      return flat.length - 1;
+    }));
+    const answers = answersFromScores(flat, {
+      questions: normalized,
+      groups: flatGroups,
+    });
+
+    return {
+      answers,
+      truncated,
+      length: n,
+      prompts: normalized.map((q) => ({
+        instructions: q.instructions,
+        options: q.options,
+      })),
+      timings: { totalMs: Math.round(now() - t0), runMs: Math.round(runMs) },
+    };
+  };
+
   return {
-    info: {
-      family: "kev",
-      model,
-      revision,
-      device: activeDevice,
-      dtype: resolvedDtype,
-      tasks: ["choice", "noul", "score"],
-      limits,
-    },
-    async decide(state, questions) {
-      const t0 = Date.now();
-      const normalized = normalizeQuestions(questions);
-      for (const [i, q] of normalized.entries()) {
-        if (q.options.length > limits.max_options) {
-          throw new TypeError(`questions[${i}]: kev supports at most ${limits.max_options} options`);
-        }
-      }
-      const stateText = renderKevContent(state);
-      const { tokens, groups, truncated } = packKevSequence({
-        stateText, questions: normalized, encode, delims, limits,
-      });
-      if (groups.length !== normalized.length) {
-        throw new Error("kev: packed fewer questions than requested");
-      }
-
-      const n = tokens.length;
-      const inputIds = new ortMod.Tensor("int64", BigInt64Array.from(tokens, BigInt), [1, n]);
-      const attentionMask = new ortMod.Tensor("int64", new BigInt64Array(n).fill(1n), [1, n]);
-      const tRun = Date.now();
-      const out = await session.run({ input_ids: inputIds, attention_mask: attentionMask });
-      const runMs = Date.now() - tRun;
-      const outLogits = out.logits ?? out[Object.keys(out)[0]];
-      if (outLogits.dims.length !== 2 || outLogits.dims[0] !== 1 || outLogits.dims[1] !== n) {
-        throw new Error("kev: invalid model logits shape");
-      }
-      const scores = Array.from(outLogits.data, Number);
-      // One flat score list; groups map each question to its option positions.
-      const flat = [];
-      const flatGroups = groups.map((ends) => ends.map((pos) => {
-        flat.push(scores[pos]);
-        return flat.length - 1;
-      }));
-      const answers = answersFromScores(flat, {
-        questions: normalized,
-        groups: flatGroups,
-      });
-
-      return {
-        answers,
-        truncated,
-        length: n,
-        prompts: normalized.map((q) => ({
-          instructions: q.instructions,
-          options: q.options,
-        })),
-        timings: { totalMs: Date.now() - t0, runMs },
-      };
-    },
+    info,
+    decide: (state, questions) => queue(() => decideImpl(state, questions)),
     async dispose() {
       try { await session.release?.(); } catch { /* optional */ }
     },

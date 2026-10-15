@@ -18,7 +18,9 @@
  */
 
 import { normalizeQuestions } from "./questions.mjs";
-import { fetchCachedBytes } from "./laya.mjs";
+import { softmaxWithTemperature } from "./answers.mjs";
+import { now, hfUrl, argmax, createSerialQueue } from "./util.mjs";
+import { fetchCachedBytes, fetchCachedJson } from "./fetch.mjs";
 
 export const BEKKO_DEFAULT_MODEL = "hotchpotch/bekko-system-one-v0-17m";
 export const BEKKO_DEFAULT_REVISION = "b886a1f9b91f4e8368d7830080d52d955e2c8dfa";
@@ -151,6 +153,9 @@ export function tokenizeBekkoRequest(request, encode, manifest, system = "") {
   ni += Math.min(instructionIds.length - ni, budget - ni - ns);
   ns += Math.min(stateIds.length - ns, budget - ni - ns);
   const truncated = ni < instructionIds.length || ns < stateIds.length;
+  const docTokenIds = request.candidates.map((c) => encode(c.text));
+  const docBudget = Math.max(0, Number(manifest.document_length ?? 0) - 1);
+  const docsTruncated = docTokenIds.some((ids) => ids.length > docBudget);
   const ins = [...im, ...instructionIds.slice(0, ni)];
   const ctx = [...sm, ...stateIds.slice(0, ns)];
   const body = request.layout === "state_instruction"
@@ -158,10 +163,8 @@ export function tokenizeBekkoRequest(request, encode, manifest, system = "") {
     : [...ins, ...sep, ...ctx];
   return {
     prefixIds: [manifest.cls_token_id, ...systemIds, ...body, manifest.sep_token_id],
-    docIds: request.candidates.map(
-      (c) => [...encode(c.text).slice(0, manifest.document_length - 1), manifest.sep_token_id],
-    ),
-    truncated,
+    docIds: docTokenIds.map((ids) => [...ids.slice(0, docBudget), manifest.sep_token_id]),
+    truncated: truncated || docsTruncated,
   };
 }
 
@@ -195,10 +198,7 @@ export function bekkoSoftmax(logits) {
   if (!Array.isArray(logits) || logits.length === 0) {
     throw new TypeError("bekkoSoftmax: logits must be a non-empty array");
   }
-  const max = Math.max(...logits);
-  const exps = logits.map((x) => Math.exp(Number(x) - max));
-  const sum = exps.reduce((a, b) => a + b, 0);
-  return exps.map((e) => e / sum);
+  return softmaxWithTemperature(logits, 1);
 }
 
 /**
@@ -214,7 +214,7 @@ export function bekkoAnswerFromLogits({ logits, task, request }) {
       `bekko: got ${probs.length} logits for ${request.candidates.length} candidates`);
   }
   const probabilities = Object.fromEntries(request.labels.map((label, i) => [label, probs[i]]));
-  const best = probs.indexOf(Math.max(...probs));
+  const best = argmax(probs);
 
   if (task === "choice") {
     return {
@@ -251,11 +251,6 @@ export function bekkoAnswerFromLogits({ logits, task, request }) {
     confidence: Math.max(...probs),
   };
 }
-
-const now = () => (typeof performance !== "undefined" ? performance.now() : Date.now());
-
-const hfUrl = (model, revision, ...parts) =>
-  `https://huggingface.co/${model}/resolve/${revision ? `${revision}/` : ""}${parts.join("/")}`;
 
 /**
  * Create a Bekko System One decider.
@@ -312,11 +307,12 @@ export async function createBekkoDecider({
   const report = (phase) => (p) =>
     onProgress?.({ phase, file: p?.file ?? null, loaded: p?.loaded ?? null, total: p?.total ?? null });
 
-  const manifestRes = await fetchImpl(manifestUrl ?? hfUrl(model, revision, subdir, "manifest.json"));
-  if (!manifestRes.ok) {
-    throw new Error(`bekko: manifest fetch failed (${manifestRes.status})`);
+  let manifest;
+  try {
+    manifest = await fetchCachedJson(manifestUrl ?? hfUrl(model, revision, subdir, "manifest.json"), { fetchImpl });
+  } catch (e) {
+    throw new Error(`bekko: manifest fetch failed (${e?.message ?? e})`, { cause: e });
   }
-  const manifest = await manifestRes.json();
   const taskColumns = manifest.tasks;
 
   /**
@@ -333,12 +329,15 @@ export async function createBekkoDecider({
         progress_callback: report("tokenizer"),
       });
     }
-    const tokRes = await fetchImpl(hfUrl(model, revision, subdir, "tokenizer.json"));
-    if (!tokRes.ok) {
-      throw new Error(`bekko: tokenizer fetch failed (${tokRes.status})`);
+    const tokUrl = hfUrl(model, revision, subdir, "tokenizer.json");
+    let tokenizerJson;
+    try {
+      tokenizerJson = await fetchCachedJson(tokUrl, { fetchImpl });
+    } catch (e) {
+      throw new Error(`bekko: tokenizer fetch failed (${e?.message ?? e})`, { cause: e });
     }
     report("tokenizer")({ file: "tokenizer.json" });
-    return new tf.PreTrainedTokenizer(await tokRes.json(), {});
+    return new tf.PreTrainedTokenizer(tokenizerJson, {});
   }
 
   const tok = await loadBekkoTokenizer();
@@ -370,18 +369,20 @@ export async function createBekkoDecider({
     }
   }
 
-  return {
-    info: {
-      family: "bekko",
-      model,
-      revision,
-      device: activeDevice,
-      tasks: [...taskColumns],
-      queryLength: manifest.query_length,
-      documentLength: manifest.document_length,
-    },
-    async decide(state, questions) {
-      const t0 = now();
+  const info = {
+    family: "bekko",
+    model,
+    revision,
+    device: activeDevice,
+    tasks: [...taskColumns],
+    queryLength: manifest.query_length,
+    documentLength: manifest.document_length,
+  };
+
+  const queue = createSerialQueue();
+
+  const decideImpl = async (state, questions) => {
+    const t0 = now();
       const normalized = normalizeQuestions(questions);
       const stateText = renderBekkoContent(state);
       const answers = [];
@@ -432,7 +433,11 @@ export async function createBekkoDecider({
         prompts,
         timings: { totalMs: Math.round(now() - t0), runMs: Math.round(runMs) },
       };
-    },
+  };
+
+  return {
+    info,
+    decide: (state, questions) => queue(() => decideImpl(state, questions)),
     async dispose() {
       try { await session.release?.(); } catch { /* optional */ }
     },

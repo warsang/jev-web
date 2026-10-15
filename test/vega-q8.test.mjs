@@ -118,6 +118,7 @@ test("buildVegaPrompt refuses an over-long state when truncation is off", () => 
   }), RangeError);
   const cut = buildVegaPrompt({ encode, stateText: "STATE", qdef, maxLen: 512 });
   assert.ok(cut.ids.length <= 512, "the default path still truncates");
+  assert.equal(cut.truncated, true, "and reports it");
 });
 
 test("poolVegaHidden reproduces Perception._pooled_batch on the same hidden states", () => {
@@ -335,7 +336,12 @@ test("createVegaDecider({variant: \"q8\"}) wires the split graphs and routes ans
   const fetchImpl = async (url) => {
     const u = String(url);
     world.calls.fetches.push(u);
-    if (u.endsWith("vega_web.json")) return { ok: true, json: async () => fixture.config };
+    if (u.endsWith("vega_web.json")) {
+      // opt_max_tokens is raised for the char-level fake tokenizer: the
+      // reference 32-token option cap would otherwise clip the noul defaults
+      // (35 ids) even though the real tokenizer packs them well under it.
+      return { ok: true, json: async () => ({ ...fixture.config, opt_max_tokens: 64 }) };
+    }
     if (u.endsWith("tokenizer.json") || u.endsWith("tokenizer_config.json")) {
       return { ok: true, json: async () => ({}) };
     }

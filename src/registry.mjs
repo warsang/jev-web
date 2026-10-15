@@ -21,6 +21,24 @@
  * object always exposes the shared contract:
  *   { info: { family, ... }, decide(state, questions) -> DecideResult, dispose? }
  * where DecideResult is `{ answers, truncated, length, prompts?, timings? }`.
+ *
+ * Truncation contract — one rule for every family:
+ *
+ *   `truncated` is `true` iff a piece of *user text* (the state, a question's
+ *   instructions, or an option) was shortened to fit the model. Padding,
+ *   batching and delimiter bookkeeping never set it; neither does a family
+ *   that trims nothing. Text that cannot be shortened safely is not dropped
+ *   silently — the family throws instead: `DecisionInputTooLongError` for
+ *   open-jev (the laid-out sequence exceeds `maxLen`), and `RangeError` for
+ *   laya (a question has more options than `max_prefixes`), strands
+ *   (shortening the instructions would eat an option), decision2 (a prompt
+ *   exceeds `maxLength`), kev (a branch exceeds `max_branch_tokens`, or the
+ *   branches leave no room for the state), vega's split export (the state
+ *   does not fit `maxLen`), and decision3 (a prompt exceeds `maxLen`).
+ *
+ * A caller can therefore read `truncated === true` as "the answer was
+ * produced with less text than I sent", and `false` as "the model saw
+ * everything" — never as a silent maybe.
  */
 
 import { createDecider } from "./session.mjs";

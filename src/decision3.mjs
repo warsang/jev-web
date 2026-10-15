@@ -40,7 +40,8 @@
  */
 import { normalizeQuestions } from "./questions.mjs";
 import { softmaxWithTemperature } from "./answers.mjs";
-import { fetchCachedBytes, fetchOnnxExternalData } from "./laya.mjs";
+import { now, hfUrl, argmax, createSerialQueue } from "./util.mjs";
+import { fetchCachedJson, fetchCachedBytes, fetchOnnxExternalData } from "./fetch.mjs";
 
 export const DECISION3_DEFAULT_MODEL = "warsang/d3-edge-web";
 // Pinned to the uploaded browser export (export/d3/05_upload.py); the
@@ -293,7 +294,7 @@ export function decision3Answers({ probs, questions }) {
     const meta = normalizeDecision3Question(question);
     const p = probs[i];
     if (meta.kind === "choice") {
-      const best = p.indexOf(Math.max(...p));
+      const best = argmax(p);
       const probabilities = Object.fromEntries(meta.keys.map((k, j) => [k, p[j]]));
       return {
         type: "choice",
@@ -320,7 +321,7 @@ export function decision3Answers({ probs, questions }) {
     return {
       type: "score",
       score: values.reduce((acc, pj, j) => acc + pj * j, 0),
-      level: p.indexOf(Math.max(...p)),
+      level: argmax(p),
       legend: Object.fromEntries(meta.keys.map((k, j) => [k, renderDecision3Canonical(meta.descriptions[j])])),
       probabilities: Object.fromEntries(meta.keys.map((k, j) => [k, values[j]])),
       confidence: decision3Confidence(values),
@@ -350,11 +351,6 @@ export function packDecision3Batch({ sequences, counts, padId }) {
 // ---------------------------------------------------------------------------
 // The decider
 // ---------------------------------------------------------------------------
-
-const now = () => (typeof performance !== "undefined" ? performance.now() : Date.now());
-
-const hfUrl = (model, revision, file) =>
-  `https://huggingface.co/${model}/resolve/${revision ? `${revision}/` : ""}${file}`;
 
 /**
  * Create a Decision 3.0 decider.
@@ -417,11 +413,10 @@ export async function createDecision3Decider({
   let config = null;
   let configSource = null;
   try {
-    const res = await fetchImpl(url);
-    if (res?.ok) {
-      config = await res.json();
-      configSource = url;
-    }
+    // Cached like every other config; missing file, transport failure or
+    // garbage JSON all fall through to the shipped defaults.
+    config = await fetchCachedJson(url, { fetchImpl, nullOn404: true });
+    if (config != null) configSource = url;
   } catch { /* fall through to the shipped defaults */ }
   if (config?.format_id && config.format_id !== "d3-code-readout-v1") {
     throw new TypeError(`decision3: unsupported format_id "${config.format_id}"`);
@@ -488,81 +483,89 @@ export async function createDecision3Decider({
   const f32 = (arr, dims) => new ortMod.Tensor("float32", arr, dims);
   const int64 = (arr, dims) => new ortMod.Tensor("int64", BigInt64Array.from(arr, BigInt), dims);
 
-  return {
-    info: {
-      family: "decision3",
-      model,
-      revision,
-      device: resolvedDevice,
-      maxLen: effMaxLen,
-      batchSize: effBatch,
-      temperature: effTemperature,
-      codes: codes.length,
-      configSource,
-    },
-    async decide(state, questions) {
-      const t0 = now();
-      const normalized = normalizeQuestions(questions);
-      const metas = normalized.map((q) => normalizeDecision3Question(q));
-      const sequences = metas.map((m) => {
-        const ids = encode(renderChat(decision3Messages(state ?? "", m.rendered, codes)));
-        if (effMaxLen && ids.length > effMaxLen) {
-          throw new RangeError(
-            `decision3: a question prompt has ${ids.length} tokens, over the maximum context length of ${effMaxLen} tokens; nothing is truncated`);
-        }
-        return ids;
+  const info = {
+    family: "decision3",
+    model,
+    revision,
+    device: resolvedDevice,
+    maxLen: effMaxLen,
+    batchSize: effBatch,
+    temperature: effTemperature,
+    codes: codes.length,
+    configSource,
+  };
+
+  // One session pair, one `decide()` at a time (a shared session is not safe
+  // for interleaved runs).
+  const queue = createSerialQueue();
+
+  const decideImpl = async (state, questions) => {
+    const t0 = now();
+    const normalized = normalizeQuestions(questions);
+    const metas = normalized.map((q) => normalizeDecision3Question(q));
+    const sequences = metas.map((m) => {
+      const ids = encode(renderChat(decision3Messages(state ?? "", m.rendered, codes)));
+      if (effMaxLen && ids.length > effMaxLen) {
+        throw new RangeError(
+          `decision3: a question prompt has ${ids.length} tokens, over the maximum context length of ${effMaxLen} tokens; nothing is truncated`);
+      }
+      return ids;
+    });
+    const counts = metas.map((m) => m.keys.length);
+    if (counts.some((n) => n > codes.length)) {
+      throw new RangeError(`decision3: a question has more options than answer codes`);
+    }
+
+    const tRun = now();
+    const allProbs = new Array(metas.length);
+    for (let start = 0; start < metas.length; start += effBatch) {
+      const stop = Math.min(start + effBatch, metas.length);
+      const part = sequences.slice(start, stop);
+      const partCounts = counts.slice(start, stop);
+      const batch = packDecision3Batch({ sequences: part, counts: partCounts, padId });
+      const torsoOut = await torso.run({
+        input_ids: int64(batch.inputIds, [batch.B, batch.width]),
+        attention_mask: int64(batch.attention, [batch.B, batch.width]),
       });
-      const counts = metas.map((m) => m.keys.length);
-      if (counts.some((n) => n > codes.length)) {
-        throw new RangeError(`decision3: a question has more options than answer codes`);
+      const last = torsoOut.last ?? torsoOut[Object.keys(torsoOut)[0]];
+      const readoutOut = await readout.run({
+        last: f32(last.data, last.dims),
+        counts: int64(partCounts, [batch.B]),
+      });
+      const logits = readoutOut.logits ?? readoutOut[Object.keys(readoutOut)[0]];
+      if (logits.dims.length !== 2 || logits.dims[0] !== batch.B) {
+        throw new Error(`decision3: invalid readout shape [${logits.dims}]`);
       }
+      const probs = decision3ProbsFromLogits({
+        logits: logits.data,
+        rowWidth: logits.dims[1],
+        counts: partCounts,
+        temperature: effTemperature,
+      });
+      probs.forEach((p, i) => { allProbs[start + i] = p; });
+    }
+    const runMs = now() - tRun;
 
-      const tRun = now();
-      const allProbs = new Array(metas.length);
-      for (let start = 0; start < metas.length; start += effBatch) {
-        const stop = Math.min(start + effBatch, metas.length);
-        const part = sequences.slice(start, stop);
-        const partCounts = counts.slice(start, stop);
-        const batch = packDecision3Batch({ sequences: part, counts: partCounts, padId });
-        const torsoOut = await torso.run({
-          input_ids: int64(batch.inputIds, [batch.B, batch.width]),
-          attention_mask: int64(batch.attention, [batch.B, batch.width]),
-        });
-        const last = torsoOut.last ?? torsoOut[Object.keys(torsoOut)[0]];
-        const readoutOut = await readout.run({
-          last: f32(last.data, last.dims),
-          counts: int64(partCounts, [batch.B]),
-        });
-        const logits = readoutOut.logits ?? readoutOut[Object.keys(readoutOut)[0]];
-        if (logits.dims.length !== 2 || logits.dims[0] !== batch.B) {
-          throw new Error(`decision3: invalid readout shape [${logits.dims}]`);
-        }
-        const probs = decision3ProbsFromLogits({
-          logits: logits.data,
-          rowWidth: logits.dims[1],
-          counts: partCounts,
-          temperature: effTemperature,
-        });
-        probs.forEach((p, i) => { allProbs[start + i] = p; });
+    const answers = decision3Answers({ probs: allProbs, questions: normalized });
+    const decode = (ids) => {
+      try {
+        return tok.decode(Array.from(ids), { skip_special_tokens: false });
+      } catch {
+        return Array.from(ids).join(" ");
       }
-      const runMs = now() - tRun;
+    };
+    return {
+      answers,
+      truncated: false,
+      length: sequences.reduce((n, s) => n + s.length, 0),
+      prompts: sequences.map(decode),
+      timings: { totalMs: Math.round(now() - t0), runMs: Math.round(runMs) },
+    };
+  };
 
-      const answers = decision3Answers({ probs: allProbs, questions: normalized });
-      const decode = (ids) => {
-        try {
-          return tok.decode(Array.from(ids), { skip_special_tokens: false });
-        } catch {
-          return Array.from(ids).join(" ");
-        }
-      };
-      return {
-        answers,
-        truncated: false,
-        length: sequences.reduce((n, s) => n + s.length, 0),
-        prompts: sequences.map(decode),
-        timings: { totalMs: Math.round(now() - t0), runMs: Math.round(runMs) },
-      };
-    },
+  return {
+    info,
+    decide: (state, questions) => queue(() => decideImpl(state, questions)),
     async dispose() {
       try { await torso.release?.(); } catch { /* optional */ }
       try { await readout.release?.(); } catch { /* optional */ }

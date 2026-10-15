@@ -1,0 +1,23 @@
+name: nightly parity
+
+on:
+  schedule:
+    # 04:17 UTC daily — off the hour so we don't race the rest of the world.
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+
+jobs:
+  parity:
+    runs-on: ubuntu-latest
+    # Real checkpoints: give the download + wasm inference room to breathe.
+    timeout-minutes: 180
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: npm install --no-audit --no-fund
+      # One real example per family, real pinned weights, probabilities
+      # compared to parity/baselines.json. Families without a baseline skip;
+      # a drift exits 1.
+      - run: npm run parity

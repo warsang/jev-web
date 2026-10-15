@@ -22,7 +22,9 @@
  */
 
 import { normalizeQuestions } from "./questions.mjs";
-import { fetchCachedBytes } from "./laya.mjs";
+import { softmaxWithTemperature } from "./answers.mjs";
+import { now, hfUrl, argmax, createSerialQueue } from "./util.mjs";
+import { fetchCachedBytes, fetchCachedJson, fetchOnnxExternalData } from "./fetch.mjs";
 
 export const DECISION2_DEFAULT_MODEL = "onnx-community/Decision-2.0-Kai-0.6B-ONNX";
 export const DECISION2_DEFAULT_REVISION = "13ab55013ab1";
@@ -153,10 +155,7 @@ export function tokenizeDecision2Segments(segments, optionEnds, encode, maxLengt
 
 /** Softmax with temperature (temperature 1 for Decision 2.0). */
 export function decision2Softmax(logits) {
-  const max = Math.max(...logits);
-  const exps = logits.map((x) => Math.exp(Number(x) - max));
-  const sum = exps.reduce((a, b) => a + b, 0);
-  return exps.map((e) => e / sum);
+  return softmaxWithTemperature(logits, 1);
 }
 
 /**
@@ -176,7 +175,7 @@ export function decision2AnswerFromLogits({ logits, question, keys, scoreBias })
     }
   }
   const probs = decision2Softmax(adjusted);
-  const best = probs.indexOf(Math.max(...probs));
+  const best = argmax(probs);
 
   if (question.type === "choice") {
     const probabilities = Object.fromEntries(keys.map((k, i) => [k, probs[i]]));
@@ -205,10 +204,6 @@ export function decision2AnswerFromLogits({ logits, question, keys, scoreBias })
     probabilities, confidence: Math.max(...probs),
   };
 }
-
-const now = () => (typeof performance !== "undefined" ? performance.now() : Date.now());
-const hfUrl = (model, revision, ...parts) =>
-  `https://huggingface.co/${model}/resolve/${revision ? `${revision}/` : ""}${parts.join("/")}`;
 
 /**
  * Create a Decision 2.0 decider.
@@ -255,9 +250,12 @@ export async function createDecision2Decider({
     : (scope?.navigator?.gpu ? "webgpu" : "wasm");
   const executionProviders = resolvedDevice === "webgpu" ? ["webgpu", "wasm"] : ["wasm"];
 
-  const configRes = await fetchImpl(configUrl ?? hfUrl(model, revision, "config.json"));
-  if (!configRes.ok) throw new Error(`decision2: config fetch failed (${configRes.status})`);
-  const config = await configRes.json();
+  let config;
+  try {
+    config = await fetchCachedJson(configUrl ?? hfUrl(model, revision, "config.json"), { fetchImpl });
+  } catch (e) {
+    throw new Error(`decision2: config fetch failed (${e?.message ?? e})`, { cause: e });
+  }
   const scoreBias = config?.decision2?.score_bias ?? {};
 
   const tok = await tf.AutoTokenizer.from_pretrained(model, {
@@ -273,7 +271,14 @@ export async function createDecision2Decider({
       const modelBytes = await fetchCachedBytes(u, {
         fetchImpl, onProgress: (p) => onProgress?.(p), persist: true,
       });
-      return ortMod.InferenceSession.create(modelBytes, opts);
+      // The quantized export ships a sibling .onnx_data; ORT-web cannot resolve
+      // it from a URL (`Module.MountedFiles is not available`), the bytes must
+      // go through session_options.externalData.
+      const external = await fetchOnnxExternalData(u, {
+        fetchImpl, onProgress: (p) => onProgress?.(p),
+      });
+      const sessionOpts = external ? { ...opts, externalData: [external] } : opts;
+      return ortMod.InferenceSession.create(modelBytes, sessionOpts);
     });
 
   let session;
@@ -290,23 +295,16 @@ export async function createDecision2Decider({
     }
   }
 
-  // Probe external data (the q8 file ships a .onnx_data sidecar).
-  try {
-    const probe = await fetchImpl(url + "_data", { method: "HEAD" });
-    if (!probe.ok) {
-      const probe2 = await fetchImpl(url.replace(/\.onnx$/, ".onnx_data"), { method: "HEAD" });
-      void probe2;
-    }
-  } catch { /* optional */ }
+  const info = {
+    family: "decision2",
+    model, revision, device: activeDevice,
+    maxLength,
+  };
 
-  return {
-    info: {
-      family: "decision2",
-      model, revision, device: activeDevice,
-      maxLength,
-    },
-    async decide(state, questions) {
-      const t0 = now();
+  const queue = createSerialQueue();
+
+  const decideImpl = async (state, questions) => {
+    const t0 = now();
       const normalized = normalizeQuestions(questions);
       const stateText = renderDecision2Content(state);
       const B = normalized.length;
@@ -374,7 +372,11 @@ export async function createDecision2Decider({
         prompts: metas.map(({ question, keys }) => ({ question: question.instructions, keys })),
         timings: { totalMs: Math.round(now() - t0), runMs: Math.round(runMs) },
       };
-    },
+  };
+
+  return {
+    info,
+    decide: (state, questions) => queue(() => decideImpl(state, questions)),
     async dispose() {
       try { await session.release?.(); } catch { /* optional */ }
     },

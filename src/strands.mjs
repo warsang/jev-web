@@ -29,7 +29,8 @@
 
 import { normalizeQuestions } from "./questions.mjs";
 import { softmaxWithTemperature } from "./answers.mjs";
-import { fetchCachedBytes, fetchOnnxExternalData } from "./laya.mjs";
+import { now, hfUrl, argmax, createSerialQueue } from "./util.mjs";
+import { fetchCachedJson, fetchCachedBytes, fetchOnnxExternalData, JsonParseError } from "./fetch.mjs";
 
 export const STRANDS_DEFAULT_MODEL = "onnx-community/strands-decider-2B-hobson-v19-ONNX";
 export const STRANDS_DEFAULT_REVISION = "31a83e0244b26d939ae33f87189d6c8204003e53";
@@ -147,21 +148,23 @@ export async function loadStrandsCalibration({
 }) {
   for (const file of files) {
     const url = hfUrl(model, revision, file);
-    let res;
+    let config;
     try {
-      res = await fetchImpl(url);
-    } catch {
+      // Route config JSON through the byte cache like every other file, so a
+      // reload does not re-request it (and an offline session still calibrates).
+      config = await fetchCachedJson(url, { fetchImpl, nullOn404: true });
+    } catch (e) {
+      if (e instanceof JsonParseError) {
+        throw new Error(
+          `strands: ${url} is not valid JSON: ${e.cause?.message ?? e.message}`,
+          { cause: e },
+        );
+      }
       // Transport failure: try the next candidate name, then the pinned
       // defaults — the tokenizer/model downloads will surface the outage.
       continue;
     }
-    if (!res?.ok) continue; // repo ships no calibration config
-    let config;
-    try {
-      config = await res.json();
-    } catch (e) {
-      throw new Error(`strands: ${url} is not valid JSON: ${e?.message ?? e}`);
-    }
+    if (config == null) continue; // repo ships no calibration config
     return { calibration: parseStrandsCalibration(config), source: url };
   }
   return { calibration: parseStrandsCalibration(null), source: null };
@@ -468,7 +471,7 @@ export function strandsAnswersFromLogits({
     const probs = softmaxWithTemperature(flat.slice(i * rowWidth, i * rowWidth + k), t);
 
     if (rq.kind === "choice") {
-      const best = probs.indexOf(Math.max(...probs));
+      const best = argmax(probs);
       answers.push({
         type: "choice",
         choice: rq.slotLabels[best],
@@ -482,7 +485,7 @@ export function strandsAnswersFromLogits({
       const byLevel = Object.fromEntries(rq.slotLabels.map((lv, j) => [lv, probs[j]]));
       const ordered = q.options.map((_, j) => byLevel[String(j)]);
       const expected = ordered.reduce((acc, p, j) => acc + p * j, 0);
-      const best = ordered.indexOf(Math.max(...ordered));
+      const best = argmax(ordered);
       answers.push({
         type: "score",
         score: expected,
@@ -502,11 +505,6 @@ export function strandsAnswersFromLogits({
   });
   return answers;
 }
-
-const now = () => (typeof performance !== "undefined" ? performance.now() : Date.now());
-
-const hfUrl = (model, revision, file) =>
-  `https://huggingface.co/${model}/resolve/${revision ? `${revision}/` : ""}${file}`;
 
 /**
  * Create a Strands Decider decider.
@@ -657,60 +655,68 @@ export async function createStrandsDecider({
 
   const int64 = (arr, dims) => new ortMod.Tensor("int64", arr, dims);
 
-  return {
-    info: {
-      family: "strands-decider",
-      model,
-      revision,
-      device: activeDevice,
-      maxLen: eff.maxLen,
+  const info = {
+    family: "strands-decider",
+    model,
+    revision,
+    device: activeDevice,
+    maxLen: eff.maxLen,
+    temperature: eff.temperature,
+    temperaturesByKind: { ...eff.temperaturesByKind },
+    ordinalSmoothing: eff.ordinalSmoothing,
+    // URL of the checkpoint config the calibration came from, or null when
+    // the repo shipped none and the pinned reference values survived.
+    configSource,
+  };
+
+  // One session, one `decide()` at a time (a shared session is not safe for
+  // interleaved runs).
+  const queue = createSerialQueue();
+
+  const decideImpl = async (state, questions) => {
+    const t0 = now();
+    const normalized = normalizeQuestions(questions);
+    const rendered = normalized.map(renderStrandsQuestion);
+    const stateText = renderStrandsState(state);
+    const { items, truncated } = buildStrandsBatch({
+      encode, stateText, rendered,
+      maxLen: eff.maxLen, maxQuestionFraction: eff.maxQuestionFraction,
+    });
+    const b = collateStrandsItems(items);
+
+    const tRun = now();
+    const out = await session.run({
+      input_ids: int64(b.inputIds, [b.n, b.L]),
+      attention_mask: int64(b.attention, [b.n, b.L]),
+      answer_pos: int64(b.answerPos, [b.n]),
+      option_pos: int64(b.optionPos, [b.n, b.K]),
+    });
+    const runMs = now() - tRun;
+    const logits = out.logits ?? out[Object.keys(out)[0]];
+
+    const answers = strandsAnswersFromLogits({
+      logits: logits.data,
+      rowWidth: b.K,
+      questions: normalized,
+      rendered,
+      temperaturesByKind: eff.temperaturesByKind,
       temperature: eff.temperature,
-      temperaturesByKind: { ...eff.temperaturesByKind },
       ordinalSmoothing: eff.ordinalSmoothing,
-      // URL of the checkpoint config the calibration came from, or null when
-      // the repo shipped none and the pinned reference values survived.
-      configSource,
-    },
-    async decide(state, questions) {
-      const t0 = now();
-      const normalized = normalizeQuestions(questions);
-      const rendered = normalized.map(renderStrandsQuestion);
-      const stateText = renderStrandsState(state);
-      const { items, truncated } = buildStrandsBatch({
-        encode, stateText, rendered,
-        maxLen: eff.maxLen, maxQuestionFraction: eff.maxQuestionFraction,
-      });
-      const b = collateStrandsItems(items);
+    });
+    const length = Number(b.attention.reduce((a, v) => a + v, 0n));
+    const prompts = items.map((it) => decode(it.ids));
+    return {
+      answers,
+      truncated,
+      length,
+      prompts,
+      timings: { totalMs: Math.round(now() - t0), runMs: Math.round(runMs) },
+    };
+  };
 
-      const tRun = now();
-      const out = await session.run({
-        input_ids: int64(b.inputIds, [b.n, b.L]),
-        attention_mask: int64(b.attention, [b.n, b.L]),
-        answer_pos: int64(b.answerPos, [b.n]),
-        option_pos: int64(b.optionPos, [b.n, b.K]),
-      });
-      const runMs = now() - tRun;
-      const logits = out.logits ?? out[Object.keys(out)[0]];
-
-      const answers = strandsAnswersFromLogits({
-        logits: logits.data,
-        rowWidth: b.K,
-        questions: normalized,
-        rendered,
-        temperaturesByKind: eff.temperaturesByKind,
-        temperature: eff.temperature,
-        ordinalSmoothing: eff.ordinalSmoothing,
-      });
-      const length = Number(b.attention.reduce((a, v) => a + v, 0n));
-      const prompts = items.map((it) => decode(it.ids));
-      return {
-        answers,
-        truncated,
-        length,
-        prompts,
-        timings: { totalMs: Math.round(now() - t0), runMs: Math.round(runMs) },
-      };
-    },
+  return {
+    info,
+    decide: (state, questions) => queue(() => decideImpl(state, questions)),
     async dispose() {
       try { await session.release?.(); } catch { /* optional */ }
     },

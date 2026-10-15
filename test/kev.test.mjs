@@ -96,10 +96,54 @@ test("packKevSequence lays out state + branches and tracks </opt> positions", ()
   assert.ok(tokens.includes(DELIM_IDS["<|fim_suffix|>"]), "each branch ends with <decide>");
 });
 
-test("packKevSequence truncates when branches exceed the budget", () => {
+test("packKevSequence throws RangeError when the branches exhaust the budget", () => {
   const questions = normalizeQuestions([choiceQ, choiceQ, choiceQ]);
-  const { groups, truncated } = packKevSequence({
-    stateText: "s",
+  // Three 42-token branches cannot fit a 40-token sequence at all: the state
+  // can shrink to zero, the questions cannot, so this is a RangeError.
+  assert.throws(
+    () => packKevSequence({
+      stateText: "s",
+      questions,
+      encode: fakeEncodeEscaped,
+      delims: {
+        state: DELIM_IDS["<|fim_prefix|>"],
+        question: DELIM_IDS["<|fim_middle|>"],
+        option_start: DELIM_IDS["<|box_start|>"],
+        option_end: DELIM_IDS["<|box_end|>"],
+        decide: DELIM_IDS["<|fim_suffix|>"],
+      },
+      limits: { max_state_tokens: 40, max_branch_tokens: 8192, max_options: 255 },
+    }),
+    RangeError,
+  );
+});
+
+test("packKevSequence throws RangeError for a branch over max_branch_tokens", () => {
+  const questions = normalizeQuestions([choiceQ]);
+  assert.throws(
+    () => packKevSequence({
+      stateText: "s",
+      questions,
+      encode: fakeEncodeEscaped,
+      delims: {
+        state: DELIM_IDS["<|fim_prefix|>"],
+        question: DELIM_IDS["<|fim_middle|>"],
+        option_start: DELIM_IDS["<|box_start|>"],
+        option_end: DELIM_IDS["<|box_end|>"],
+        decide: DELIM_IDS["<|fim_suffix|>"],
+      },
+      limits: { max_state_tokens: 8192, max_branch_tokens: 10, max_options: 255 },
+    }),
+    /branch too long/,
+  );
+});
+
+test("packKevSequence trims the state to the leftover room and reports truncated", () => {
+  const questions = normalizeQuestions([choiceQ]);
+  // choiceQ's branch packs to 43 ids in the fake encoding, so a 60-token
+  // sequence leaves 60 - 43 - 1 = 16 ids of state room.
+  const { tokens, groups, truncated } = packKevSequence({
+    stateText: "0123456789abcdefghij", // 20 ids > 16
     questions,
     encode: fakeEncodeEscaped,
     delims: {
@@ -109,10 +153,28 @@ test("packKevSequence truncates when branches exceed the budget", () => {
       option_end: DELIM_IDS["<|box_end|>"],
       decide: DELIM_IDS["<|fim_suffix|>"],
     },
-    limits: { max_state_tokens: 40, max_branch_tokens: 8192, max_options: 255 },
+    limits: { max_state_tokens: 60, max_branch_tokens: 8192, max_options: 255 },
   });
-  assert.equal(truncated, true);
-  assert.ok(groups.length < 3, "later questions dropped");
+  assert.equal(truncated, true, "state was shortened");
+  assert.equal(tokens.length, 60, "fills the sequence but never exceeds it");
+  assert.deepEqual(tokens.slice(1, 17), fakeEncodeEscaped("0123456789abcdef"), "state keeps its head");
+  assert.equal(groups.length, 1, "the question is still packed");
+
+  // A state that fits is not reported as truncated.
+  const fits = packKevSequence({
+    stateText: "short",
+    questions,
+    encode: fakeEncodeEscaped,
+    delims: {
+      state: DELIM_IDS["<|fim_prefix|>"],
+      question: DELIM_IDS["<|fim_middle|>"],
+      option_start: DELIM_IDS["<|box_start|>"],
+      option_end: DELIM_IDS["<|box_end|>"],
+      decide: DELIM_IDS["<|fim_suffix|>"],
+    },
+    limits: { max_state_tokens: 60, max_branch_tokens: 8192, max_options: 255 },
+  });
+  assert.equal(fits.truncated, false);
 });
 
 function fakeTransformers() {

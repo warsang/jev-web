@@ -195,3 +195,12 @@ export {
   detectWebGPU,
   loadModelConfig,
 } from "./config.mjs";
+export {
+  MODEL_CACHE,
+  HttpError,
+  JsonParseError,
+  requestPersistentStorage,
+  fetchCachedBytes,
+  fetchCachedJson,
+  fetchOnnxExternalData,
+} from "./fetch.mjs";

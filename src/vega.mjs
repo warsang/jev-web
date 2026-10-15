@@ -38,7 +38,8 @@
  */
 import { normalizeQuestions } from "./questions.mjs";
 import { softmaxWithTemperature } from "./answers.mjs";
-import { fetchCachedBytes, fetchOnnxExternalData } from "./laya.mjs";
+import { now, hfUrl, argmax, createSerialQueue } from "./util.mjs";
+import { fetchCachedJson, fetchCachedBytes, fetchOnnxExternalData, HttpError } from "./fetch.mjs";
 
 export const VEGA_DEFAULT_MODEL = "warsang/vega-08b-web";
 export const VEGA_DEFAULT_REVISION = "d2bd4604ed770ca614745f07f623b66e89f406e4";
@@ -215,8 +216,13 @@ export function vegaOptionTexts(qdef) {
  * export refuses the decision instead (a cut-off record is worse than none),
  * so its runtime passes false and gets a RangeError.
  *
+ * The shared truncation contract applies: `truncated` is true iff any user
+ * text was shortened — an option over `optMaxTokens`, instructions over
+ * `insMaxTokens`, the query-first prefix over its 128-token cap, a state that
+ * did not fit its room, or the fixed-size re-fit cutting any of the above.
+ *
  * @returns {{ids:number[], spans:{state:[number,number], question:[number,number],
- *   options:[number,number][], last:number}}}
+ *   options:[number,number][], last:number}, truncated:boolean}}
  */
 export function buildVegaPrompt({
   encode,
@@ -232,10 +238,16 @@ export function buildVegaPrompt({
   const options = vegaOptionTexts(qdef);
   const enc = (s) => encode(s, false);
   const bos = bosId === null ? [] : [bosId];
+  let truncated = false;
   let head = enc(VEGA_HEAD);
-  let qids = enc(VEGA_QUESTION.replace("{t}", qdef.t).replace("{ins}", qdef.ins))
-    .slice(0, insMaxTokens);
-  let oids = options.map((o) => enc(VEGA_OPTION.replace("{o}", o)).slice(0, optMaxTokens));
+  const qFull = enc(VEGA_QUESTION.replace("{t}", qdef.t).replace("{ins}", qdef.ins));
+  if (qFull.length > insMaxTokens) truncated = true;
+  let qids = qFull.slice(0, insMaxTokens);
+  let oids = options.map((o) => {
+    const full = enc(VEGA_OPTION.replace("{o}", o));
+    if (full.length > optMaxTokens) truncated = true;
+    return full.slice(0, optMaxTokens);
+  });
   const end = enc(VEGA_END);
   let fixed = bos.length + head.length + qids.length
     + oids.reduce((n, o) => n + o.length, 0) + end.length;
@@ -243,18 +255,25 @@ export function buildVegaPrompt({
     const per = Math.max(3, Math.floor(
       (maxLen - 16 - bos.length - head.length - end.length - Math.min(qids.length, 64))
       / Math.max(1, oids.length)));
-    oids = oids.map((o) => o.slice(0, per));
-    qids = qids.slice(0, Math.max(
+    oids = oids.map((o) => {
+      if (o.length > per) truncated = true;
+      return o.slice(0, per);
+    });
+    const qRoom = Math.max(
       8, maxLen - 16 - bos.length - head.length - end.length
-        - oids.reduce((n, o) => n + o.length, 0)));
+        - oids.reduce((n, o) => n + o.length, 0));
+    if (qids.length > qRoom) truncated = true;
+    qids = qids.slice(0, qRoom);
     fixed = bos.length + head.length + qids.length
       + oids.reduce((n, o) => n + o.length, 0) + end.length;
   }
   let st = enc(stateText);
   let pre = [];
   if (queryFirstMaxState && st.length < queryFirstMaxState) {
-    pre = enc(VEGA_QUERY_FIRST.replace("{t}", qdef.t).replace("{ins}", qdef.ins))
-      .slice(0, Math.min(128, insMaxTokens));
+    const preFull = enc(VEGA_QUERY_FIRST.replace("{t}", qdef.t).replace("{ins}", qdef.ins));
+    const cap = Math.min(128, insMaxTokens);
+    if (preFull.length > cap) truncated = true;
+    pre = preFull.slice(0, cap);
     fixed += pre.length;
   }
   const room = Math.max(0, maxLen - fixed);
@@ -263,6 +282,7 @@ export function buildVegaPrompt({
       `vega: state is ${st.length} tokens, only ${room} fit in maxLen=${maxLen}`
       + " (this export refuses a truncated state; raise maxLen)");
   }
+  if (st.length > room) truncated = true;
   st = st.slice(0, room); // truncate_left = false: the head of the state is kept
   const ids = [...bos, ...pre, ...head];
   const s0 = ids.length;
@@ -279,7 +299,7 @@ export function buildVegaPrompt({
   }
   ids.push(...end);
   spans.last = ids.length - 1;
-  return { ids, spans };
+  return { ids, spans, truncated };
 }
 
 // ---------------------------------------------------------------------------
@@ -458,7 +478,7 @@ export function vegaAnswers({
     const qtype = VEGA_QTYPE_NAMES[qtypes[r]];
     const cal = calibrations?.[r] ?? calibration;
     const conf = Math.max(...p);
-    const best = p.indexOf(Math.max(...p));
+    const best = argmax(p);
     // LAC prediction set; the top option is always kept so it is never empty.
     const th = cal?.conformal?.[qtype]?.[String(alpha)];
     const predictionSet = th === undefined ? null
@@ -604,11 +624,6 @@ export function poolVegaHidden({
 // The decider
 // ---------------------------------------------------------------------------
 
-const now = () => (typeof performance !== "undefined" ? performance.now() : Date.now());
-
-const hfUrl = (model, revision, file) =>
-  `https://huggingface.co/${model}/resolve/${revision ? `${revision}/` : ""}${file}`;
-
 /**
  * Session opener shared by both Vega formats: graph bytes (plus an external
  * data sibling when the graph has one) go through the injected fetch and the
@@ -726,11 +741,10 @@ async function createVegaFusedDecider({
   let config = null;
   let configSource = null;
   try {
-    const res = await fetchImpl(configUrl);
-    if (res?.ok) {
-      config = await res.json();
-      configSource = configUrl;
-    }
+    // Cached like every other config; missing file, transport failure or
+    // garbage JSON all fall through to the shipped defaults.
+    config = await fetchCachedJson(configUrl, { fetchImpl, nullOn404: true });
+    if (config != null) configSource = configUrl;
   } catch { /* fall through to the shipped defaults */ }
   const cfg = { ...VEGA_DEFAULTS, ...(config ?? {}) };
   const calibration = config?.calibration ?? {};
@@ -756,134 +770,142 @@ async function createVegaFusedDecider({
   const f32 = (arr, dims) => new ortMod.Tensor("float32", arr, dims);
   const bool = (arr, dims) => new ortMod.Tensor("bool", arr, dims);
 
-  return {
-    info: {
-      family: "vega",
-      format: "fused",
-      model,
-      revision,
-      device: resolvedDevice,
-      maxLen: effMaxLen,
-      alpha: String(alpha),
-      risk: String(effRisk),
-      calibrationSource: configSource,
-      nSteps: cfg.n_steps ?? cfg.nSteps,
-      config,
-    },
-    async decide(state, questions) {
-      const t0 = now();
-      const normalized = normalizeQuestions(questions);
-      const qdefs = normalized.map(vegaQuestionDef);
-      const stateText = renderVegaText(state);
-      const bosId = tok.bos_token_id ?? null;
+  const info = {
+    family: "vega",
+    format: "fused",
+    model,
+    revision,
+    device: resolvedDevice,
+    maxLen: effMaxLen,
+    alpha: String(alpha),
+    risk: String(effRisk),
+    calibrationSource: configSource,
+    nSteps: cfg.n_steps ?? cfg.nSteps,
+    config,
+  };
 
-      const items = qdefs.map((qdef) => {
-        const { ids, spans } = buildVegaPrompt({
-          encode, stateText, qdef, maxLen: effMaxLen,
-          bosId,
-          queryFirstMaxState: cfg.query_first_max_state ?? cfg.queryFirstMaxState,
-          optMaxTokens: cfg.opt_max_tokens ?? cfg.optMaxTokens,
-          insMaxTokens: 256,
-        });
-        return { ids, spans, qtype: VEGA_QTYPE[qdef.t], options: vegaOptionTexts(qdef) };
-      });
+  // One session pair, one `decide()` at a time (a shared session is not safe
+  // for interleaved runs).
+  const queue = createSerialQueue();
 
-      const batch = packVegaBatch(items, {
-        chunks: cfg.memory_chunks ?? cfg.memoryChunks,
-      });
-      const chunkMask = packVegaChunks(batch.pool, items, batch.L, {
-        chunks: cfg.memory_chunks ?? cfg.memoryChunks,
-        chunkMinTokens: cfg.memory_min_tokens ?? cfg.memoryMinTokens,
-        chunkTokens: cfg.memory_chunk_tokens ?? cfg.memoryChunkTokens,
-        nseg: batch.nseg,
-      });
+  const decideImpl = async (state, questions) => {
+    const t0 = now();
+    const normalized = normalizeQuestions(questions);
+    const qdefs = normalized.map(vegaQuestionDef);
+    const stateText = renderVegaText(state);
+    const bosId = tok.bos_token_id ?? null;
 
-      const tRun = now();
-      // Torso: one causal read to the deepest captured layer, all span means
-      // (segments + state chunks) pooled in-graph from the one forward.
-      const torsoOut = await torso.run({
-        input_ids: int64(batch.inputIds, [batch.n, batch.L]),
-        attention_mask: int64(batch.attention, [batch.n, batch.L]),
-        pool: f32(batch.pool, batch.poolDims),
+    const items = qdefs.map((qdef) => {
+      const { ids, spans, truncated } = buildVegaPrompt({
+        encode, stateText, qdef, maxLen: effMaxLen,
+        bosId,
+        queryFirstMaxState: cfg.query_first_max_state ?? cfg.queryFirstMaxState,
+        optMaxTokens: cfg.opt_max_tokens ?? cfg.optMaxTokens,
+        insMaxTokens: 256,
       });
-      const pooled = torsoOut.pooled ?? torsoOut[Object.keys(torsoOut)[0]];
-      // pooled: [B, nLayers, nseg + C, d] — nLayers = feature_layers,
-      // rows 0..2 = state/question/last, 3..3+K = options, then C chunk rows.
-      const pd = pooled.dims;
-      const d = pd[3];
-      const Lc = pd[1];
-      const rowsTotal = pd[2];
-      const C = rowsTotal - batch.nseg;
-      const pv = pooled.data;
-      const feats = new Float32Array(batch.n * Lc * 3 * d);
-      const opts = new Float32Array(batch.n * batch.K * d);
-      const chunks = new Float32Array(batch.n * C * d);
-      for (let b = 0; b < batch.n; b++) {
-        for (let l = 0; l < Lc; l++) {
-          for (let s = 0; s < 3; s++) {
-            const row = s; // pooling rows 0/1/2 are state/question/last
-            const src = ((b * Lc + l) * rowsTotal + row) * d;
-            feats.set(pv.subarray(src, src + d), ((b * Lc + l) * 3 + s) * d);
-          }
-        }
-        // options from the deepest captured layer only (option_layers)
-        for (let k = 0; k < batch.K; k++) {
-          const src = ((b * Lc + Lc - 1) * rowsTotal + 3 + k) * d;
-          opts.set(pv.subarray(src, src + d), (b * batch.K + k) * d);
-        }
-        // chunk means: deepest feature layer, rows nseg..nseg + C
-        for (let c = 0; c < C; c++) {
-          const src = ((b * Lc + Lc - 1) * rowsTotal + batch.nseg + c) * d;
-          chunks.set(pv.subarray(src, src + d), (b * C + c) * d);
+      return { ids, spans, qtype: VEGA_QTYPE[qdef.t], options: vegaOptionTexts(qdef), truncated };
+    });
+
+    const batch = packVegaBatch(items, {
+      chunks: cfg.memory_chunks ?? cfg.memoryChunks,
+    });
+    const chunkMask = packVegaChunks(batch.pool, items, batch.L, {
+      chunks: cfg.memory_chunks ?? cfg.memoryChunks,
+      chunkMinTokens: cfg.memory_min_tokens ?? cfg.memoryMinTokens,
+      chunkTokens: cfg.memory_chunk_tokens ?? cfg.memoryChunkTokens,
+      nseg: batch.nseg,
+    });
+
+    const tRun = now();
+    // Torso: one causal read to the deepest captured layer, all span means
+    // (segments + state chunks) pooled in-graph from the one forward.
+    const torsoOut = await torso.run({
+      input_ids: int64(batch.inputIds, [batch.n, batch.L]),
+      attention_mask: int64(batch.attention, [batch.n, batch.L]),
+      pool: f32(batch.pool, batch.poolDims),
+    });
+    const pooled = torsoOut.pooled ?? torsoOut[Object.keys(torsoOut)[0]];
+    // pooled: [B, nLayers, nseg + C, d] — nLayers = feature_layers,
+    // rows 0..2 = state/question/last, 3..3+K = options, then C chunk rows.
+    const pd = pooled.dims;
+    const d = pd[3];
+    const Lc = pd[1];
+    const rowsTotal = pd[2];
+    const C = rowsTotal - batch.nseg;
+    const pv = pooled.data;
+    const feats = new Float32Array(batch.n * Lc * 3 * d);
+    const opts = new Float32Array(batch.n * batch.K * d);
+    const chunks = new Float32Array(batch.n * C * d);
+    for (let b = 0; b < batch.n; b++) {
+      for (let l = 0; l < Lc; l++) {
+        for (let s = 0; s < 3; s++) {
+          const row = s; // pooling rows 0/1/2 are state/question/last
+          const src = ((b * Lc + l) * rowsTotal + row) * d;
+          feats.set(pv.subarray(src, src + d), ((b * Lc + l) * 3 + s) * d);
         }
       }
+      // options from the deepest captured layer only (option_layers)
+      for (let k = 0; k < batch.K; k++) {
+        const src = ((b * Lc + Lc - 1) * rowsTotal + 3 + k) * d;
+        opts.set(pv.subarray(src, src + d), (b * batch.K + k) * d);
+      }
+      // chunk means: deepest feature layer, rows nseg..nseg + C
+      for (let c = 0; c < C; c++) {
+        const src = ((b * Lc + Lc - 1) * rowsTotal + batch.nseg + c) * d;
+        chunks.set(pv.subarray(src, src + d), (b * C + c) * d);
+      }
+    }
 
-      // Engine: landscape + integrator -> raw logits and the physics state.
-      const engineOut = await engine.run({
-        feats: f32(feats, [batch.n, Lc, 3, d]),
-        opts: f32(opts, [batch.n, batch.K, d]),
-        opt_mask: bool(batch.optMask, [batch.n, batch.K]),
-        qtype: int64(batch.qtypes, [batch.n]),
-        chunks: f32(chunks, [batch.n, C, d]),
-        chunk_mask: bool(chunkMask, [batch.n, C]),
-      });
-      const logits = engineOut.logits.data;
-      const kinetic = engineOut.kinetic.data;
-      const nearest = engineOut.nearest.data;
-      const stepsUsed = Array.from(engineOut.steps_used.data, Number);
+    // Engine: landscape + integrator -> raw logits and the physics state.
+    const engineOut = await engine.run({
+      feats: f32(feats, [batch.n, Lc, 3, d]),
+      opts: f32(opts, [batch.n, batch.K, d]),
+      opt_mask: bool(batch.optMask, [batch.n, batch.K]),
+      qtype: int64(batch.qtypes, [batch.n]),
+      chunks: f32(chunks, [batch.n, C, d]),
+      chunk_mask: bool(chunkMask, [batch.n, C]),
+    });
+    const logits = engineOut.logits.data;
+    const kinetic = engineOut.kinetic.data;
+    const nearest = engineOut.nearest.data;
+    const stepsUsed = Array.from(engineOut.steps_used.data, Number);
 
-      const nOpts = items.map((it) => it.options.length);
-      const phys = vegaThermalFeatures({
-        kinetic, nearest, stepsUsed, nOpts, maxSteps: cfg.n_steps ?? cfg.nSteps,
-      });
-      const probs = vegaThermalProbabilities({
-        logits, rowWidth: batch.K, qtypes: batch.qtypes,
-        phys: phys.flat(), nOpts,
-        theta: calibration.theta ?? VEGA_DEFAULT_THETA,
-      });
-      const runMs = now() - tRun;
-      const labels = vegaOptionLabels(normalized);
-      const answers = vegaAnswers({
-        probs, qtypes: batch.qtypes, labels,
-        physics: { nearest, stepsUsed },
-        rawLogits: logits, rowWidth: batch.K,
-        calibration, alpha, risk: effRisk,
-      });
-      const decode = (ids) => {
-        try {
-          return tok.decode(Array.from(ids), { skip_special_tokens: false });
-        } catch {
-          return Array.from(ids).join(" ");
-        }
-      };
-      return {
-        answers,
-        truncated: false,
-        length: Number(batch.attention.reduce((a, v) => a + v, 0n)),
-        prompts: items.map((it) => decode(it.ids)),
-        timings: { totalMs: Math.round(now() - t0), runMs: Math.round(runMs) },
-      };
-    },
+    const nOpts = items.map((it) => it.options.length);
+    const phys = vegaThermalFeatures({
+      kinetic, nearest, stepsUsed, nOpts, maxSteps: cfg.n_steps ?? cfg.nSteps,
+    });
+    const probs = vegaThermalProbabilities({
+      logits, rowWidth: batch.K, qtypes: batch.qtypes,
+      phys: phys.flat(), nOpts,
+      theta: calibration.theta ?? VEGA_DEFAULT_THETA,
+    });
+    const runMs = now() - tRun;
+    const labels = vegaOptionLabels(normalized);
+    const answers = vegaAnswers({
+      probs, qtypes: batch.qtypes, labels,
+      physics: { nearest, stepsUsed },
+      rawLogits: logits, rowWidth: batch.K,
+      calibration, alpha, risk: effRisk,
+    });
+    const decode = (ids) => {
+      try {
+        return tok.decode(Array.from(ids), { skip_special_tokens: false });
+      } catch {
+        return Array.from(ids).join(" ");
+      }
+    };
+    return {
+      answers,
+      truncated: items.some((it) => it.truncated),
+      length: Number(batch.attention.reduce((a, v) => a + v, 0n)),
+      prompts: items.map((it) => decode(it.ids)),
+      timings: { totalMs: Math.round(now() - t0), runMs: Math.round(runMs) },
+    };
+  };
+
+  return {
+    info,
+    decide: (state, questions) => queue(() => decideImpl(state, questions)),
     async dispose() {
       try { await torso.release?.(); } catch { /* optional */ }
       try { await engine.release?.(); } catch { /* optional */ }
@@ -935,11 +957,10 @@ async function createVegaSplitDecider({
   let config = null;
   let configSource = null;
   try {
-    const res = await fetchImpl(configUrl);
-    if (res?.ok) {
-      config = await res.json();
-      configSource = configUrl;
-    }
+    // Cached like every other config; missing file, transport failure or
+    // garbage JSON all fall through to the shipped defaults.
+    config = await fetchCachedJson(configUrl, { fetchImpl, nullOn404: true });
+    if (config != null) configSource = configUrl;
   } catch { /* fall through to the shipped defaults */ }
   const cfg = { ...VEGA_DEFAULTS, ...(config ?? {}) };
   const calibration = config?.calibration ?? {};
@@ -954,9 +975,17 @@ async function createVegaSplitDecider({
   // runtime does. Older transformers falls back to AutoTokenizer.
   const fetchJson = async (file) => {
     const url = hfUrl(configRepo, configRevision, `${basePath}${file}`);
-    const res = await fetchImpl(url);
-    if (!res?.ok) throw new Error(`vega: ${url} not found (HTTP ${res?.status ?? "no response"})`);
-    return res.json();
+    try {
+      return await fetchCachedJson(url, { fetchImpl });
+    } catch (e) {
+      if (e instanceof HttpError) {
+        throw new Error(
+          `vega: ${url} not found (HTTP ${e.status ?? "no response"})`,
+          { cause: e },
+        );
+      }
+      throw e;
+    }
   };
   let tok;
   if (typeof tf.PreTrainedTokenizer === "function") {
@@ -995,127 +1024,135 @@ async function createVegaSplitDecider({
   const f32 = (arr, dims) => new ortMod.Tensor("float32", arr, dims);
   const bool = (arr, dims) => new ortMod.Tensor("bool", arr, dims);
 
-  return {
-    info: {
-      family: "vega",
-      format: "split",
-      model,
-      revision,
-      subfolder: subfolder ?? null,
-      device: resolvedDevice,
-      maxLen: effMaxLen,
-      alpha: String(alpha),
-      risk: String(effRisk),
-      calibrationSource: configSource,
-      nSteps: cfg.n_steps ?? cfg.nSteps,
-      adapters: adapters.map((a) => a.name),
-      config,
-    },
-    async decide(state, questions) {
-      const t0 = now();
-      const normalized = normalizeQuestions(questions);
-      const qdefs = normalized.map(vegaQuestionDef);
-      const stateText = renderVegaText(state);
-      const C = Number(cfg.memory_chunks ?? VEGA_DEFAULTS.memoryChunks);
-      const chunkMinTokens = cfg.memory_min_tokens ?? VEGA_DEFAULTS.memoryMinTokens;
-      const chunkTokens = cfg.memory_chunk_tokens ?? VEGA_DEFAULTS.memoryChunkTokens;
+  const info = {
+    family: "vega",
+    format: "split",
+    model,
+    revision,
+    subfolder: subfolder ?? null,
+    device: resolvedDevice,
+    maxLen: effMaxLen,
+    alpha: String(alpha),
+    risk: String(effRisk),
+    calibrationSource: configSource,
+    nSteps: cfg.n_steps ?? cfg.nSteps,
+    adapters: adapters.map((a) => a.name),
+    config,
+  };
 
-      const items = qdefs.map((qdef) => {
-        const { ids, spans } = buildVegaPrompt({
-          encode, stateText, qdef, maxLen: effMaxLen,
-          bosId: null, // the reference adds no BOS for Qwen, and the export never does
-          queryFirstMaxState: cfg.query_first_max_state ?? cfg.queryFirstMaxState,
-          optMaxTokens: cfg.opt_max_tokens ?? cfg.optMaxTokens,
-          insMaxTokens: 256,
-          truncateState: false, // the export refuses a state that does not fit
-        });
-        return { ids, spans, qtype: VEGA_QTYPE[qdef.t], options: vegaOptionTexts(qdef) };
+  // One session set, one `decide()` at a time (a shared session is not safe
+  // for interleaved runs).
+  const queue = createSerialQueue();
+
+  const decideImpl = async (state, questions) => {
+    const t0 = now();
+    const normalized = normalizeQuestions(questions);
+    const qdefs = normalized.map(vegaQuestionDef);
+    const stateText = renderVegaText(state);
+    const C = Number(cfg.memory_chunks ?? VEGA_DEFAULTS.memoryChunks);
+    const chunkMinTokens = cfg.memory_min_tokens ?? VEGA_DEFAULTS.memoryMinTokens;
+    const chunkTokens = cfg.memory_chunk_tokens ?? VEGA_DEFAULTS.memoryChunkTokens;
+
+    const items = qdefs.map((qdef) => {
+      const { ids, spans, truncated } = buildVegaPrompt({
+        encode, stateText, qdef, maxLen: effMaxLen,
+        bosId: null, // the reference adds no BOS for Qwen, and the export never does
+        queryFirstMaxState: cfg.query_first_max_state ?? cfg.queryFirstMaxState,
+        optMaxTokens: cfg.opt_max_tokens ?? cfg.optMaxTokens,
+        insMaxTokens: 256,
+        truncateState: false, // the export refuses a state that does not fit
       });
+      return { ids, spans, qtype: VEGA_QTYPE[qdef.t], options: vegaOptionTexts(qdef), truncated };
+    });
 
-      // One decoder pass per question (the export's own reading), pooling in JS.
-      const tRun = now();
-      const rows = [];
-      const prompts = [];
-      for (const it of items) {
-        const L = it.ids.length;
-        const embedOut = await embed.run({
-          input_ids: int64(BigInt64Array.from(it.ids, BigInt), [1, L]),
-        });
-        const embeds = embedOut.inputs_embeds.data;
-        const d = embeds.length / L;
-        const decOut = await decoder.run({
-          ...past,
-          inputs_embeds: f32(embeds, [1, L, d]),
-          attention_mask: int64(new BigInt64Array(L).fill(1n), [1, L]),
-          position_ids: int64(vegaTextPositions(L), [3, 1, L]),
-        });
-        const pooled = poolVegaHidden({
-          h13: decOut.h13.data, h19: decOut.h19.data, spans: it.spans, d,
-          chunks: C, chunkMinTokens, chunkTokens,
-        });
-        const K = it.options.length;
-        const eng = await engine.run({
-          feats: f32(pooled.feats, [1, 2, 3, d]),
-          opts: f32(pooled.opts, [1, K, 1, d]),
-          opt_mask: bool(new Uint8Array(K).fill(1), [1, K]),
-          qtype: int64([BigInt(it.qtype)], [1]),
-          chunks: f32(pooled.chunks, [1, C, d]),
-          chunk_mask: bool(pooled.cmask, [1, C]),
-        });
-        rows.push({
-          qtype: it.qtype,
-          K,
-          logits: Array.from(eng.logits.data).slice(0, K),
-          kinetic: eng.kinetic.data[0],
-          nearest: eng.nearest.data[0],
-          stepsUsed: Number(eng.steps_used.data[0]),
-          gates: Array.from(eng.gates.data),
-        });
-        prompts.push(decode(it.ids));
-      }
+    // One decoder pass per question (the export's own reading), pooling in JS.
+    const tRun = now();
+    const rows = [];
+    const prompts = [];
+    for (const it of items) {
+      const L = it.ids.length;
+      const embedOut = await embed.run({
+        input_ids: int64(BigInt64Array.from(it.ids, BigInt), [1, L]),
+      });
+      const embeds = embedOut.inputs_embeds.data;
+      const d = embeds.length / L;
+      const decOut = await decoder.run({
+        ...past,
+        inputs_embeds: f32(embeds, [1, L, d]),
+        attention_mask: int64(new BigInt64Array(L).fill(1n), [1, L]),
+        position_ids: int64(vegaTextPositions(L), [3, 1, L]),
+      });
+      const pooled = poolVegaHidden({
+        h13: decOut.h13.data, h19: decOut.h19.data, spans: it.spans, d,
+        chunks: C, chunkMinTokens, chunkTokens,
+      });
+      const K = it.options.length;
+      const eng = await engine.run({
+        feats: f32(pooled.feats, [1, 2, 3, d]),
+        opts: f32(pooled.opts, [1, K, 1, d]),
+        opt_mask: bool(new Uint8Array(K).fill(1), [1, K]),
+        qtype: int64([BigInt(it.qtype)], [1]),
+        chunks: f32(pooled.chunks, [1, C, d]),
+        chunk_mask: bool(pooled.cmask, [1, C]),
+      });
+      rows.push({
+        qtype: it.qtype,
+        K,
+        logits: Array.from(eng.logits.data).slice(0, K),
+        kinetic: eng.kinetic.data[0],
+        nearest: eng.nearest.data[0],
+        stepsUsed: Number(eng.steps_used.data[0]),
+        gates: Array.from(eng.gates.data),
+      });
+      prompts.push(decode(it.ids));
+    }
 
-      const nOpts = rows.map((r) => r.K);
-      const rowWidth = Math.max(...nOpts);
-      const logits = new Float32Array(rows.length * rowWidth);
-      rows.forEach((r, b) => logits.set(r.logits, b * rowWidth));
-      const phys = vegaThermalFeatures({
-        kinetic: rows.map((r) => r.kinetic),
+    const nOpts = rows.map((r) => r.K);
+    const rowWidth = Math.max(...nOpts);
+    const logits = new Float32Array(rows.length * rowWidth);
+    rows.forEach((r, b) => logits.set(r.logits, b * rowWidth));
+    const phys = vegaThermalFeatures({
+      kinetic: rows.map((r) => r.kinetic),
+      nearest: rows.map((r) => r.nearest),
+      stepsUsed: rows.map((r) => r.stepsUsed),
+      nOpts, maxSteps: cfg.n_steps ?? cfg.nSteps,
+    });
+    // Each question is calibrated by the adapter its gate routes it to
+    // (route_adapters: the most open gate, if it reaches the threshold).
+    const gateThreshold = adapters[0]?.gate_threshold ?? 0.5;
+    const gates = rows.map((r) => r.gates);
+    const routes = gates.map((g) => vegaRoute(g, gateThreshold));
+    const calibrations = routes.map(
+      (rt) => (rt >= 0 ? adapters[rt]?.calibration : null) ?? calibration);
+    const thetaByRow = calibrations.map(
+      (cal, b) => cal?.theta?.[rows[b].qtype] ?? VEGA_DEFAULT_THETA[rows[b].qtype]);
+    const probs = vegaThermalProbabilities({
+      logits, rowWidth, qtypes: rows.map((r) => r.qtype),
+      phys: phys.flat(), nOpts, thetaByRow,
+    });
+    const runMs = now() - tRun;
+    const answers = vegaAnswers({
+      probs, qtypes: rows.map((r) => r.qtype), labels: vegaOptionLabels(normalized),
+      physics: {
         nearest: rows.map((r) => r.nearest),
         stepsUsed: rows.map((r) => r.stepsUsed),
-        nOpts, maxSteps: cfg.n_steps ?? cfg.nSteps,
-      });
-      // Each question is calibrated by the adapter its gate routes it to
-      // (route_adapters: the most open gate, if it reaches the threshold).
-      const gateThreshold = adapters[0]?.gate_threshold ?? 0.5;
-      const gates = rows.map((r) => r.gates);
-      const routes = gates.map((g) => vegaRoute(g, gateThreshold));
-      const calibrations = routes.map(
-        (rt) => (rt >= 0 ? adapters[rt]?.calibration : null) ?? calibration);
-      const thetaByRow = calibrations.map(
-        (cal, b) => cal?.theta?.[rows[b].qtype] ?? VEGA_DEFAULT_THETA[rows[b].qtype]);
-      const probs = vegaThermalProbabilities({
-        logits, rowWidth, qtypes: rows.map((r) => r.qtype),
-        phys: phys.flat(), nOpts, thetaByRow,
-      });
-      const runMs = now() - tRun;
-      const answers = vegaAnswers({
-        probs, qtypes: rows.map((r) => r.qtype), labels: vegaOptionLabels(normalized),
-        physics: {
-          nearest: rows.map((r) => r.nearest),
-          stepsUsed: rows.map((r) => r.stepsUsed),
-        },
-        rawLogits: logits, rowWidth,
-        calibration, calibrations, alpha, risk: effRisk,
-        adapterNames: adapters.map((a) => a.name), gates, routes,
-      });
-      return {
-        answers,
-        truncated: false,
-        length: items.reduce((n, it) => n + it.ids.length, 0),
-        prompts,
-        timings: { totalMs: Math.round(now() - t0), runMs: Math.round(runMs) },
-      };
-    },
+      },
+      rawLogits: logits, rowWidth,
+      calibration, calibrations, alpha, risk: effRisk,
+      adapterNames: adapters.map((a) => a.name), gates, routes,
+    });
+    return {
+      answers,
+      truncated: items.some((it) => it.truncated),
+      length: items.reduce((n, it) => n + it.ids.length, 0),
+      prompts,
+      timings: { totalMs: Math.round(now() - t0), runMs: Math.round(runMs) },
+    };
+  };
+
+  return {
+    info,
+    decide: (state, questions) => queue(() => decideImpl(state, questions)),
     async dispose() {
       try { await embed.release?.(); } catch { /* optional */ }
       try { await decoder.release?.(); } catch { /* optional */ }

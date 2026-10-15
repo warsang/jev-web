@@ -179,6 +179,46 @@ test("createDecision2Decider batches questions and decodes answers", async () =>
   await decider.dispose();
 });
 
+test("createDecision2Decider passes the export's external data to ORT", async () => {
+  const created = [];
+  const ort = {
+    env: { wasm: {} },
+    Tensor: class Tensor {
+      constructor(type, data, dims) { this.type = type; this.data = data; this.dims = dims; }
+    },
+    InferenceSession: {
+      create: async (bytes, opts) => {
+        created.push({ bytes, opts });
+        return { run: async () => { throw new Error("not used"); }, release: async () => {} };
+      },
+    },
+  };
+  const fetchImpl = async (url, opts) => {
+    const key = String(url);
+    if (key.endsWith("config.json")) return { ok: true, json: async () => CONFIG };
+    if (key.endsWith("model_quantized.onnx.data")) {
+      if (opts?.method === "HEAD") return { ok: true };
+      return { ok: true, arrayBuffer: async () => new Uint8Array([1, 2, 3, 4]).buffer };
+    }
+    if (key.endsWith("model_quantized.onnx")) {
+      return { ok: true, arrayBuffer: async () => new Uint8Array([9, 9, 9]).buffer };
+    }
+    if (opts?.method === "HEAD") return { ok: false, status: 404 };
+    throw new Error(`unexpected fetch ${key}`);
+  };
+
+  const decider = await createDecision2Decider({
+    ort, transformers: fakeTransformers(), fetchImpl, device: "wasm",
+  });
+  assert.equal(created.length, 1);
+  assert.deepEqual(created[0].opts.executionProviders, ["wasm"]);
+  const external = created[0].opts.externalData;
+  assert.ok(Array.isArray(external), "externalData is passed to ORT");
+  assert.equal(external[0].path, "model_quantized.onnx.data");
+  assert.deepEqual(Array.from(external[0].data), [1, 2, 3, 4]);
+  await decider.dispose();
+});
+
 test("createDecision2Decider variant shortcut selects eos/sol", async () => {
   const ort = fakeOrt();
   const decider = await createDecision2Decider({

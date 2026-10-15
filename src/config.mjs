@@ -5,14 +5,15 @@
 // repo with the same typed-decision graph layout works: pass `model` and
 // optionally `revision`.
 
+import { hfUrl } from "./util.mjs";
+import { fetchCachedJson } from "./fetch.mjs";
+
 export const DEFAULT_MODEL = "onnx-community/open-jev-deberta-v3-large-ONNX";
 export const DEFAULT_REVISION = "7c79f25b5ac496089f448a969c801872ad59d31c";
 export const DEFAULT_TEMPERATURE = 1.05;
 export const DEFAULT_MARKERS = ["[STATE]", "[Q]", "[OPT]"];
 export const DEFAULT_MAX_STATE_TOKENS = 256;
 export const DEFAULT_MAX_LEN = 512;
-
-const HF_BASE = "https://huggingface.co";
 
 export function resolveDevice({ device = "auto", webgpu = false } = {}) {
   if (device && device !== "auto") return device;
@@ -37,6 +38,7 @@ export async function detectWebGPU(scope = globalThis) {
 
 // Read the model's own calibration/marker config when the repo ships one
 // (open_jev_config.json), else fall back to the published reference values.
+// The read goes through the Cache API, so an offline reload keeps working.
 export async function loadModelConfig({ model = DEFAULT_MODEL, revision = DEFAULT_REVISION, fetchImpl = fetch } = {}) {
   const fallback = {
     temperature: DEFAULT_TEMPERATURE,
@@ -46,11 +48,10 @@ export async function loadModelConfig({ model = DEFAULT_MODEL, revision = DEFAUL
     pool: "span",
     source: "defaults",
   };
-  const url = `${HF_BASE}/${model}/resolve/${revision ? `${revision}/` : ""}open_jev_config.json`;
+  const url = hfUrl(model, revision, "open_jev_config.json");
   try {
-    const res = await fetchImpl(url, { cache: "no-store" });
-    if (!res.ok) return fallback;
-    const cfg = await res.json();
+    const cfg = await fetchCachedJson(url, { fetchImpl, nullOn404: true });
+    if (!cfg) return fallback;
     return {
       temperature: Number.isFinite(Number(cfg.temperature)) ? Number(cfg.temperature) : fallback.temperature,
       markers: Array.isArray(cfg.markers) && cfg.markers.length === 3 ? cfg.markers.map(String) : fallback.markers,

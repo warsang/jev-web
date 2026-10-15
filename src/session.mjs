@@ -5,8 +5,7 @@
 // builds). Everything heavy stays out of module scope.
 
 import { normalizeQuestions } from "./questions.mjs";
-
-const now = () => (typeof performance !== "undefined" ? performance.now() : Date.now());
+import { now, createSerialQueue } from "./util.mjs";
 import { buildDecisionInput, typedMarkerIds } from "./encode.mjs";
 import { answersFromScores } from "./answers.mjs";
 import {
@@ -77,21 +76,23 @@ export async function createDecider({
 
   const i64 = (values, dims) => new tf.Tensor("int64", BigInt64Array.from(values, BigInt), dims);
 
-  return {
-    info: {
-      family: "open-jev",
-      model,
-      revision,
-      device: resolvedDevice,
-      dtype: resolvedDtype,
-      temperature: effective.temperature,
-      maxStateTokens: effective.maxStateTokens,
-      maxLen: effective.maxLen,
-      pool: remote.pool,
-      configSource: remote.source,
-    },
-    async decide(state, questions) {
-      const t0 = now();
+  const info = {
+    family: "open-jev",
+    model,
+    revision,
+    device: resolvedDevice,
+    dtype: resolvedDtype,
+    temperature: effective.temperature,
+    maxStateTokens: effective.maxStateTokens,
+    maxLen: effective.maxLen,
+    pool: remote.pool,
+    configSource: remote.source,
+  };
+
+  const queue = createSerialQueue();
+
+  const decideImpl = async (state, questions) => {
+    const t0 = now();
       const normalized = normalizeQuestions(questions);
       const tokenized = normalized.map((q) => ({
         type: q.type,
@@ -138,14 +139,18 @@ export async function createDecider({
         prompts: [prompt],
         timings: { totalMs: Math.round(now() - t0), inferMs: Math.round(inferMs) },
       };
-    },
+  };
+
+  return {
+    info,
+    decide: (state, questions) => queue(() => decideImpl(state, questions)),
     async decideMany(cases) {
       const out = [];
       for (const c of cases ?? []) out.push(await this.decide(c.state, c.questions));
       return out;
     },
-    dispose() {
-      net?.dispose?.();
+    async dispose() {
+      try { await net?.dispose?.(); } catch { /* optional */ }
     },
   };
 }

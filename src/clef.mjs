@@ -35,7 +35,8 @@
  */
 import { normalizeQuestions } from "./questions.mjs";
 import { softmaxWithTemperature } from "./answers.mjs";
-import { fetchCachedBytes, fetchOnnxExternalData } from "./laya.mjs";
+import { now, hfUrl, argmax, createSerialQueue } from "./util.mjs";
+import { fetchCachedJson, fetchCachedBytes, fetchOnnxExternalData } from "./fetch.mjs";
 
 export const CLEF_DEFAULT_MODEL = "warsang/clef-text-0.6b-web";
 // Pinned to the uploaded browser export (export/clef/04_upload.py).
@@ -295,7 +296,7 @@ export function clefAnswers({ probs, questions }) {
     const p = probs[i];
     if (q.type === "choice") {
       const { keys } = clefQuestionOptions(q);
-      const best = p.indexOf(Math.max(...p));
+      const best = argmax(p);
       const choice = keys[best];
       const index = q.options.indexOf(choice);
       return {
@@ -323,7 +324,7 @@ export function clefAnswers({ probs, questions }) {
     return {
       type: "score",
       score: p.reduce((acc, pj, j) => acc + pj * values[j], 0),
-      level: p.indexOf(Math.max(...p)),
+      level: argmax(p),
       legend: Object.fromEntries(q.options.map((level, j) => [String(j), level])),
       probabilities: Object.fromEntries(p.map((pj, j) => [String(j), pj])),
       confidence: Math.max(...p),
@@ -334,11 +335,6 @@ export function clefAnswers({ probs, questions }) {
 // ---------------------------------------------------------------------------
 // The decider
 // ---------------------------------------------------------------------------
-
-const now = () => (typeof performance !== "undefined" ? performance.now() : Date.now());
-
-const hfUrl = (model, revision, file) =>
-  `https://huggingface.co/${model}/resolve/${revision ? `${revision}/` : ""}${file}`;
 
 /**
  * Create a clef decider.
@@ -388,11 +384,10 @@ export async function createClefDecider({
   let config = null;
   let configSource = null;
   try {
-    const res = await fetchImpl(url);
-    if (res?.ok) {
-      config = await res.json();
-      configSource = url;
-    }
+    // Cached like every other config; missing file, transport failure or
+    // garbage JSON all fall through to the shipped defaults.
+    config = await fetchCachedJson(url, { fetchImpl, nullOn404: true });
+    if (config != null) configSource = url;
   } catch { /* fall through to the shipped defaults */ }
   const cfg = { ...CLEF_DEFAULTS, ...(config ?? {}) };
   const effMaxLen = Number.isFinite(maxLen) && maxLen > 0 ? maxLen : cfg.maxLen;
@@ -429,68 +424,76 @@ export async function createClefDecider({
   const f32 = (arr, dims) => new ortMod.Tensor("float32", arr, dims);
   const bool = (arr, dims) => new ortMod.Tensor("bool", Uint8Array.from(arr), dims);
 
-  return {
-    info: {
-      family: "clef",
-      model,
-      revision,
-      device: resolvedDevice,
-      maxLen: effMaxLen,
-      maxStateTokens: maxStateTokens ?? cfg.max_state_tokens ?? null,
-      head: config?.head ?? null,
-      configSource,
-    },
-    async decide(state, questions) {
-      const t0 = now();
-      const normalized = normalizeQuestions(questions);
-      const stateText = renderClefContent(state ?? "");
-      const record = encodeClefRecord({
-        encode, stateText, questions: normalized,
-        maxLength: effMaxLen,
-        maxStateTokens: maxStateTokens ?? cfg.max_state_tokens ?? null,
-      });
-      const batch = packClefBatch(record);
+  const info = {
+    family: "clef",
+    model,
+    revision,
+    device: resolvedDevice,
+    maxLen: effMaxLen,
+    maxStateTokens: maxStateTokens ?? cfg.max_state_tokens ?? null,
+    head: config?.head ?? null,
+    configSource,
+  };
 
-      const tRun = now();
-      const out = await session.run({
-        input_ids: int64(record.ids, [1, batch.L]),
-        attention_mask: int64(record.ids.map(() => 1), [1, batch.L]),
-        pool_global: f32(batch.poolGlobal, [1, 1, batch.L]),
-        pool_question: f32(batch.poolQuestion, [1, batch.Q, batch.L]),
-        pool_option: f32(batch.poolOption, [1, batch.S, batch.L]),
-        type_ids: int64(batch.typeIds, [batch.Q]),
-        slot_question: int64(batch.slotQuestion, [batch.S]),
-        opt_mask: bool(batch.optMask, [batch.S]),
-      });
-      const runMs = now() - tRun;
-      const logits = out.logits ?? out[Object.keys(out)[0]];
-      const dims = logits.dims;
-      if (dims.length !== 2 || dims[0] !== 1 || dims[1] !== batch.S) {
-        throw new Error(
-          `clef: invalid logits shape [${dims}] for ${batch.Q} questions with ${batch.S} option slots`);
-      }
-      const probs = [];
-      for (let q = 0; q < batch.Q; q++) {
-        const row = Array.from(
-          { length: batch.counts[q] },
-          (_, k) => Number(logits.data[q * batch.K + k]));
-        probs.push(softmaxWithTemperature(row, 1));
-      }
-      const answers = clefAnswers({ probs, questions: normalized });
-      let prompt;
-      try {
-        prompt = tok.decode(record.ids, { skip_special_tokens: false });
-      } catch {
-        prompt = record.ids.join(" ");
-      }
-      return {
-        answers,
-        truncated: record.truncated,
-        length: record.length,
-        prompts: [prompt],
-        timings: { totalMs: Math.round(now() - t0), runMs: Math.round(runMs) },
-      };
-    },
+  // One session, one `decide()` at a time (a shared session is not safe for
+  // interleaved runs).
+  const queue = createSerialQueue();
+
+  const decideImpl = async (state, questions) => {
+    const t0 = now();
+    const normalized = normalizeQuestions(questions);
+    const stateText = renderClefContent(state ?? "");
+    const record = encodeClefRecord({
+      encode, stateText, questions: normalized,
+      maxLength: effMaxLen,
+      maxStateTokens: maxStateTokens ?? cfg.max_state_tokens ?? null,
+    });
+    const batch = packClefBatch(record);
+
+    const tRun = now();
+    const out = await session.run({
+      input_ids: int64(record.ids, [1, batch.L]),
+      attention_mask: int64(record.ids.map(() => 1), [1, batch.L]),
+      pool_global: f32(batch.poolGlobal, [1, 1, batch.L]),
+      pool_question: f32(batch.poolQuestion, [1, batch.Q, batch.L]),
+      pool_option: f32(batch.poolOption, [1, batch.S, batch.L]),
+      type_ids: int64(batch.typeIds, [batch.Q]),
+      slot_question: int64(batch.slotQuestion, [batch.S]),
+      opt_mask: bool(batch.optMask, [batch.S]),
+    });
+    const runMs = now() - tRun;
+    const logits = out.logits ?? out[Object.keys(out)[0]];
+    const dims = logits.dims;
+    if (dims.length !== 2 || dims[0] !== 1 || dims[1] !== batch.S) {
+      throw new Error(
+        `clef: invalid logits shape [${dims}] for ${batch.Q} questions with ${batch.S} option slots`);
+    }
+    const probs = [];
+    for (let q = 0; q < batch.Q; q++) {
+      const row = Array.from(
+        { length: batch.counts[q] },
+        (_, k) => Number(logits.data[q * batch.K + k]));
+      probs.push(softmaxWithTemperature(row, 1));
+    }
+    const answers = clefAnswers({ probs, questions: normalized });
+    let prompt;
+    try {
+      prompt = tok.decode(record.ids, { skip_special_tokens: false });
+    } catch {
+      prompt = record.ids.join(" ");
+    }
+    return {
+      answers,
+      truncated: record.truncated,
+      length: record.length,
+      prompts: [prompt],
+      timings: { totalMs: Math.round(now() - t0), runMs: Math.round(runMs) },
+    };
+  };
+
+  return {
+    info,
+    decide: (state, questions) => queue(() => decideImpl(state, questions)),
     async dispose() {
       try { await session.release?.(); } catch { /* optional */ }
     },

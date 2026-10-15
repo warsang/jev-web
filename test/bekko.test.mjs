@@ -26,7 +26,7 @@ import { normalizeQuestions } from "../src/questions.mjs";
 
 const MANIFEST = {
   query_length: 4096,
-  document_length: 16,
+  document_length: 96,
   cls_token_id: 50281,
   sep_token_id: 50282,
   pad_token_id: 50283,
@@ -96,6 +96,15 @@ test("tokenizeBekkoRequest splits the query budget and marks truncation", () => 
   const t2 = tokenizeBekkoRequest(long, fakeEncode, MANIFEST);
   assert.equal(t2.truncated, true, "over-budget instruction/state truncate");
   assert.ok(t2.prefixIds.length <= MANIFEST.query_length);
+
+  const longDoc = renderBekkoRequest({
+    ...choiceQ,
+    options: ["billing", "sales"],
+    criteria: { billing: "y".repeat(5000), sales: "short" },
+  }, "state");
+  const t3 = tokenizeBekkoRequest(longDoc, fakeEncode, MANIFEST);
+  assert.equal(t3.truncated, true, "an over-budget candidate document flags truncation");
+  assert.ok(t3.docIds.every((d) => d.length <= MANIFEST.document_length));
 });
 
 test("collateBekkoDocs builds the five model feeds", () => {

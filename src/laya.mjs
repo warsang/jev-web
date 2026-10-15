@@ -19,6 +19,12 @@
 
 import { normalizeQuestions } from "./questions.mjs";
 import { softmaxWithTemperature } from "./answers.mjs";
+import { now, hfUrl, argmax, createSerialQueue } from "./util.mjs";
+import { fetchCachedBytes, fetchOnnxExternalData } from "./fetch.mjs";
+
+// The fetch helpers were born here; re-export so hosts (and older tests) that
+// imported them from laya.mjs keep working.
+export { requestPersistentStorage, fetchCachedBytes, fetchOnnxExternalData } from "./fetch.mjs";
 
 export const LAYA_DEFAULT_MODEL = "alfred361/laya-typed-decisions-web-q8";
 export const LAYA_DEFAULT_REVISION = "96f637c0bee046dce5c61a3174de9f7cdcf09ace";
@@ -99,16 +105,28 @@ export function buildLayaSequence({
   if (qtype === undefined) throw new TypeError(`laya: unsupported question type ${question.type}`);
 
   const strip = (s) => String(s).replace(/\[MASK\]/g, " ");
-  let headIds = encode(`${question.type} question: ${strip(question.instructions)}`);
-  let optIds = options.map((o) => [ids.mask, ...encode(` ${strip(o)}`).slice(0, 48)]);
+  // `truncated` is true iff any user text was shortened (the shared contract;
+  // see README "Truncation"). The reference caps each option at 48 tokens.
+  let truncated = false;
+  const headTokens = encode(`${question.type} question: ${strip(question.instructions)}`);
+  let optIds = options.map((o) => {
+    const full = encode(` ${strip(o)}`);
+    if (full.length > 48) truncated = true;
+    return [ids.mask, ...full.slice(0, 48)];
+  });
 
   let optBudget = headMaxLen - optIds.reduce((n, o) => n + o.length, 0);
   if (optBudget < 16) {
     const per = Math.max(4, Math.floor((headMaxLen - 16) / Math.max(1, optIds.length)));
-    optIds = optIds.map((o) => o.slice(0, per));
+    optIds = optIds.map((o) => {
+      if (o.length > per) truncated = true;
+      return o.slice(0, per);
+    });
     optBudget = headMaxLen - optIds.reduce((n, o) => n + o.length, 0);
   }
-  headIds = headIds.slice(0, Math.max(8, optBudget));
+  const headBudget = Math.max(8, optBudget);
+  if (headTokens.length > headBudget) truncated = true;
+  const headIds = headTokens.slice(0, headBudget);
 
   let seq = [ids.cls, ...headIds, ids.sep];
   const markers = [];
@@ -118,14 +136,18 @@ export function buildLayaSequence({
   }
   seq.push(ids.sep);
   const room = Math.max(0, maxLen - seq.length - 1);
-  const stateIds = encode(String(state ?? "")).slice(0, room);
+  const stateTokens = encode(String(state ?? ""));
+  const stateIds = stateTokens.slice(0, room);
+  if (stateIds.length < stateTokens.length) truncated = true;
   seq = [...seq, ...stateIds, ids.sep];
 
   const clipped = seq.slice(0, maxLen);
+  if (clipped.length < seq.length) truncated = true;
   return {
     ids: clipped,
     markers: markers.filter((m) => m < maxLen),
     qtype,
+    truncated,
   };
 }
 
@@ -174,7 +196,7 @@ export function layaAnswersFromLogits({
       ? -probs.reduce((acc, p) => acc + p * Math.log(Math.max(p, 1e-12)), 0) / Math.log(k)
       : 0;
     const confidence = Math.min(1, Math.max(0, 1 - entropy));
-    const best = probs.indexOf(Math.max(...probs));
+    const best = argmax(probs);
 
     if (q.type === "choice") {
       answers.push({
@@ -278,156 +300,6 @@ export function layaTokenizerAdapter(tok) {
     },
     pad: idOf("pad_token_id", "[PAD]"),
   };
-}
-
-const now = () => (typeof performance !== "undefined" ? performance.now() : Date.now());
-
-const hfUrl = (model, revision, file) =>
-  `https://huggingface.co/${model}/resolve/${revision ? `${revision}/` : ""}${file}`;
-
-const MODEL_CACHE = "kf-models-v1";
-
-async function modelCacheStore() {
-  try {
-    return typeof caches !== "undefined" ? caches : null;
-  } catch {
-    return null;
-  }
-}
-
-/** Ask for persistent storage once so big weights survive eviction pressure. */
-export async function requestPersistentStorage() {
-  try {
-    return (await globalThis.navigator?.storage?.persist?.()) ?? false;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Fetch bytes with a Cache-API layer. Hugging Face redirects to a *signed*
- * CDN URL that changes per request, so the browser HTTP cache never hits for
- * the 468 MB encoder weights; this caches them under the stable model URL
- * instead (Cache API), so a page refresh is free.
- *
- * @returns {Promise<Uint8Array>}
- */
-export async function fetchCachedBytes(url, {
-  fetchImpl = fetch,
-  onProgress = null,
-  cacheName = MODEL_CACHE,
-  force = false,
-  persist = false,
-} = {}) {
-  const store = await modelCacheStore();
-  if (persist) await requestPersistentStorage();
-  if (store && !force) {
-    try {
-      const hit = await store.match(url);
-      if (hit) {
-        const data = new Uint8Array(await hit.arrayBuffer());
-        onProgress?.({ phase: "cache", file: String(url).split("/").pop(), loaded: data.length, total: data.length });
-        return data;
-      }
-    } catch {
-      /* cache read failed — fall through to the network */
-    }
-  }
-  const res = await fetchImpl(url);
-  if (!res?.ok) throw new Error(`fetch ${url} failed (HTTP ${res?.status ?? "no response"})`);
-  const data = await readBytesWithProgress(res, url, onProgress);
-  if (store) {
-    try {
-      await store.put(url, new Response(data, {
-        headers: { "content-type": "application/octet-stream", "content-length": String(data.length) },
-      }));
-    } catch {
-      /* quota exceeded / private mode — caching is best-effort */
-    }
-  }
-  return data;
-}
-
-async function readBytesWithProgress(res, url, onProgress) {
-  const total = Number(res.headers?.get?.("content-length")) || 0;
-  const file = String(url).split("/").pop();
-  if (res.body?.getReader) {
-    const reader = res.body.getReader();
-    let received = 0;
-    let data = total ? new Uint8Array(total) : null;
-    const chunks = total ? null : [];
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (data) {
-        if (received + value.length > data.length) {
-          // content-length can describe the *encoded* size (gzip/br), so the
-          // decoded stream may be larger — grow instead of overflowing.
-          const grown = new Uint8Array(Math.max(data.length * 2, received + value.length));
-          grown.set(data.subarray(0, received));
-          data = grown;
-        }
-        data.set(value, received);
-      } else {
-        chunks.push(value);
-      }
-      received += value.length;
-      onProgress?.({ phase: "download", file, loaded: received, total: total || null });
-    }
-    if (!data) {
-      data = new Uint8Array(received);
-      let off = 0;
-      for (const c of chunks) { data.set(c, off); off += c.length; }
-    } else {
-      // the buffer may have grown past the decoded length (content-length is
-      // the *encoded* size) — always trim to what was actually received
-      data = data.subarray(0, received);
-    }
-    return data;
-  }
-  let data;
-  if (typeof res.arrayBuffer === "function") {
-    data = new Uint8Array(await res.arrayBuffer());
-  } else if (typeof res.text === "function") {
-    data = new TextEncoder().encode(await res.text());
-  } else if (typeof res.json === "function") {
-    data = new TextEncoder().encode(JSON.stringify(await res.json()));
-  } else {
-    throw new Error(`fetch ${url}: response has no readable body`);
-  }
-  onProgress?.({ phase: "download", file, loaded: data.length, total: data.length });
-  return data;
-}
-
-/**
- * ONNX external-data loader.
- *
- * The pinned Laya export stores weights in `<model>.onnx.data` siblings
- * (encoder ~468 MB, head ~53 MB). onnxruntime-web cannot resolve those from a
- * URL by itself (`Module.MountedFiles is not available`); it needs the bytes
- * passed via `session_options.externalData`. Fetch the sibling (streaming,
- * with progress) and hand it over.
- *
- * @returns {Promise<{path:string, data:Uint8Array}|null>} null when the model
- *   has no external data (404) or the fetch fails.
- */
-export async function fetchOnnxExternalData(url, { fetchImpl = fetch, onProgress = null, force = false } = {}) {
-  // Probe `<model>.onnx.data` (laya web-q8 layout) then `<model>.onnx_data`
-  // (onnx-community layout); a 404 on both means the model has no external data.
-  for (const suffix of [".data", "_data"]) {
-    const dataUrl = `${url}${suffix}`;
-    const path = `${String(url).split("/").pop()}${suffix}`;
-    try {
-      // Probe cheaply first: a 404 means "try the next suffix".
-      const head = await fetchImpl(dataUrl, { method: "HEAD" }).catch(() => null);
-      if (head && !head.ok) continue;
-      const data = await fetchCachedBytes(dataUrl, { fetchImpl, onProgress, force, persist: true });
-      return { path, data };
-    } catch {
-      // fall through to the next suffix
-    }
-  }
-  return null;
 }
 
 /**
@@ -537,26 +409,30 @@ export async function createLayaDecider({
   const int64 = (arr, dims) => new ortMod.Tensor("int64", arr, dims);
   const bool = (arr, dims) => new ortMod.Tensor("bool", arr, dims);
 
-  return {
-    info: {
-      family: "laya",
-      model,
-      revision,
-      device: activeDevice,
-      dtype: "q8",
-      maxLen,
-      headMaxLen,
-      maxPrefixes,
-      // Single representative temperature for UIs that show one value
-      // (noul:2 bucket, else the noul type temperature); per-bucket values
-      // below are what the decoder actually applies.
-      temperature: clampTemperature(temperatureByOptions["noul:2"] ?? temperatures[2] ?? 1),
-      temperatures: temperatures.map(clampTemperature),
-      temperatureByOptions: Object.fromEntries(
-        Object.entries(temperatureByOptions).map(([k, v]) => [k, clampTemperature(v)])),
-    },
-    async decide(state, questions) {
-      const t0 = now();
+  const info = {
+    family: "laya",
+    model,
+    revision,
+    device: activeDevice,
+    dtype: "q8",
+    maxLen,
+    headMaxLen,
+    maxPrefixes,
+    // Single representative temperature for UIs that show one value
+    // (noul:2 bucket, else the noul type temperature); per-bucket values
+    // below are what the decoder actually applies.
+    temperature: clampTemperature(temperatureByOptions["noul:2"] ?? temperatures[2] ?? 1),
+    temperatures: temperatures.map(clampTemperature),
+    temperatureByOptions: Object.fromEntries(
+      Object.entries(temperatureByOptions).map(([k, v]) => [k, clampTemperature(v)])),
+  };
+
+  // One session pair, one `decide()` at a time (a shared session is not safe
+  // for interleaved runs).
+  const queue = createSerialQueue();
+
+  const decideImpl = async (state, questions) => {
+    const t0 = now();
       const normalized = normalizeQuestions(questions);
       const items = normalized.map((q) =>
         buildLayaSequence({ encode: adapter.encode, ids: adapter.ids, state, question: q, maxLen, headMaxLen, maxPrefixes }));
@@ -611,7 +487,7 @@ export async function createLayaDecider({
       const headMs = now() - tHead;
       return {
         answers,
-        truncated: items.some((it) => it.ids.length >= maxLen),
+        truncated: items.some((it) => it.truncated),
         length,
         prompts,
         timings: {
@@ -621,7 +497,11 @@ export async function createLayaDecider({
           headPerQuestionMs,
         },
       };
-    },
+  };
+
+  return {
+    info,
+    decide: (state, questions) => queue(() => decideImpl(state, questions)),
     async dispose() {
       try { await encoder.release?.(); } catch { /* optional */ }
       try { await head.release?.(); } catch { /* optional */ }

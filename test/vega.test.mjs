@@ -75,6 +75,21 @@ test("buildVegaPrompt reproduces the reference prompt exactly", () => {
   }
 });
 
+test("buildVegaPrompt reports truncated only when user text was shortened", () => {
+  // char-level stand-in: one id per character
+  const encode = (text) => Array.from({ length: String(text).length }, () => 7);
+  const qdef = { t: "choice", ins: "Instructions.", crit: { a: null, b: null } };
+  assert.equal(
+    buildVegaPrompt({ encode, stateText: "state", qdef, maxLen: 4096 }).truncated,
+    false, "everything fits");
+  assert.equal(
+    buildVegaPrompt({ encode, stateText: "state", qdef, maxLen: 4096, optMaxTokens: 3 }).truncated,
+    true, "an option over its cap");
+  assert.equal(
+    buildVegaPrompt({ encode, stateText: "state", qdef, maxLen: 4096, insMaxTokens: 5 }).truncated,
+    true, "instructions over their cap");
+});
+
 function fixtureCrit(c) {
   if (c.name === "score") return ["cosmetic", "annoying", "severe", "outage"];
   if (c.name === "boolean") return {};
@@ -274,6 +289,10 @@ test("createVegaDecider wires both graphs and decodes all three kinds", async ()
       ok: true,
       json: async () => ({
         ...cfg,
+        // The char-level stand-in tokenizes ~1 id per character, so the
+        // reference 32-token option cap would clip the noul defaults (35 ids)
+        // even though the real tokenizer packs them well under it.
+        opt_max_tokens: 64,
         calibration: fixture.calibration,
         theta: fixture.thermal.theta,
       }),
