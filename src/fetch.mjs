@@ -242,13 +242,13 @@ export async function fetchOnnxExternalData(url, { fetchImpl = fetch, onProgress
   for (const suffix of [".data", "_data"]) {
     const dataUrl = `${url}${suffix}`;
     const path = `${String(url).split("/").pop()}${suffix}`;
-    // Probe cheaply first: a 404 means "try the next suffix".
+    // Probe cheaply first: a 404 means "try the next suffix". Any other
+    // unhappy HEAD (5xx, or a proxy that blocks HEAD) only skips the *probe* —
+    // fall through to the GET, which is the operation we actually need; a
+    // blocked HEAD must never be the reason existing weights go unfetched.
     const head = await fetchImpl(dataUrl, { method: "HEAD" }).catch(() => null);
-    if (head && !head.ok) {
-      // Only a definite 404 counts as "this sibling does not exist"; a 5xx or
-      // a blocked HEAD is a transport problem and must not be remembered.
-      if (head.status === 404) absent = true;
-      else uncertain = true;
+    if (head && !head.ok && head.status === 404) {
+      absent = true;
       continue;
     }
     try {

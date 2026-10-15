@@ -570,3 +570,18 @@ test("fetchOnnxExternalData remembers 'no external data' so reloads don't re-pro
   }), null);
   assert.deepEqual(again, [], "the negative marker answers the probe");
 });
+
+test("fetchOnnxExternalData falls through to GET when HEAD is blocked", async () => {
+  const url = "https://example.test/repo/resolve/rev/blocked.onnx";
+  const calls = [];
+  const fetchImpl = async (u, init) => {
+    calls.push(`${init?.method ?? "GET"} ${u}`);
+    // A proxy that rejects HEAD (429) but serves the file on GET.
+    if (init?.method === "HEAD") return { ok: false, status: 429 };
+    return { ok: true, arrayBuffer: async () => new Uint8Array([5, 6]).buffer };
+  };
+  const external = await fetchOnnxExternalData(url, { fetchImpl });
+  assert.equal(external?.path, "blocked.onnx.data");
+  assert.deepEqual(Array.from(external.data), [5, 6]);
+  assert.deepEqual(calls, [`HEAD ${url}.data`, `GET ${url}.data`]);
+});
