@@ -18,6 +18,11 @@ jobs:
           node-version: 22
       # npm ci: parity numbers depend on the locked ORT/transformers versions.
       - run: npm ci --no-audit --no-fund
+      # The large browser exports (strands-decider) do not fit ORT-web's
+      # wasm32 heap on a headless host; parity loads them through the native
+      # runtime instead. --no-save keeps the locked graph untouched (and the
+      # alias out of package.json, so only this job pays for the native build).
+      - run: npm i --no-save --no-audit --no-fund onnxruntime-node-131@npm:onnxruntime-node@1.31.0-dev.20260914-8d85527a0
       # One real example per family, real pinned weights, probabilities
       # compared to parity/baselines.json. Families without a baseline skip;
       # a drift exits 1.

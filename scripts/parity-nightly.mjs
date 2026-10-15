@@ -13,11 +13,25 @@
  * The run downloads the real pinned checkpoints, so it belongs in a scheduled
  * job (see .github/workflows/nightly.yml), not in unit CI.
  *
+ * A browser export too large for ORT-web's wasm32 heap on a headless host
+ * (`strands-decider` today) is loaded through the native onnxruntime-node
+ * instead — see `nativeOrt` below and the install step in the nightly
+ * workflow. clef's fused fp16 graph loads only in a real browser (it rejects
+ * at load on onnxruntime-node 1.30 and 1.31 alike, and does not fit the wasm32
+ * heap), so that family has no baseline and skips until one can be recorded.
+ *
+ * Every family runs in its own child process. Two reasons: a family that
+ * injects a native runtime must not share a process with the families that pull
+ * in the runtime bundled by transformers (both ORT generations in one process
+ * mis-negotiate the native API version and have crashed), and a native crash in
+ * one family then fails that family instead of the whole run.
+ *
  * What is compared: every answer field (including the full probability map),
  * the truncation flag, the fused length, and — when a family reports it — the
  * decoded prompt. Timings are the only part of a DecideResult that is not
  * compared (they are wall-clock and never reproducible).
  */
+import { spawnSync } from "node:child_process";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -49,14 +63,61 @@ const QUESTIONS = [
   },
 ];
 
-// Per-family tweaks: runtime options for the headless (Node) run, or an
-// example override when a family cannot answer the shared three. Keep the
-// state/questions equal to STATE and QUESTIONS wherever possible so one
-// recording pass covers every family.
+/**
+ * Native onnxruntime-node 1.31 (installed by the nightly under the npm alias
+ * "onnxruntime-node-131"; see .github/workflows/nightly.yml) adapted to the
+ * call shape the families expect from onnxruntime-web:
+ *
+ *   - InferenceSession.create maps their ["wasm"] provider request onto the
+ *     native CPU provider;
+ *   - Tensor accepts numeric arrays for int64 inputs (native ORT wants
+ *     BigInt64Array).
+ */
+async function nativeOrt() {
+  let native;
+  try {
+    native = await import("onnxruntime-node-131");
+  } catch {
+    throw new Error(
+      "this family is exercised through the native runtime; install it with "
+      + "`npm i --no-save onnxruntime-node-131@npm:onnxruntime-node@1.31.0-dev.20260914-8d85527a0`");
+  }
+  if (!String(native.env?.versions?.node ?? "").startsWith("1.31")) {
+    throw new Error(`onnxruntime-node-131 resolved to ${native.env?.versions?.node}; 1.31 is required`);
+  }
+  class Tensor extends native.Tensor {
+    constructor(type, data, dims) {
+      super(type, type === "int64" && !(data instanceof BigInt64Array)
+        ? BigInt64Array.from(data, (value) => BigInt(value))
+        : data, dims);
+    }
+  }
+  return {
+    env: native.env,
+    Tensor,
+    InferenceSession: {
+      create: (bytes, opts = {}) => native.InferenceSession.create(bytes, {
+        ...opts,
+        executionProviders: ["cpu"],
+      }),
+    },
+  };
+}
+
+// Per-family tweaks: runtime options for the headless (Node) run, an example
+// override when a family cannot answer the shared three, or a `setup` hook for
+// injections that are not plain JSON (a native runtime, say). Options are part
+// of the stored baseline, so keep them plain objects.
 const CASES = {
   // transformers.js' Node build (onnxruntime-node) rejects "wasm", while the
   // browser default is wasm — the headless run asks for cpu explicitly.
   "open-jev": { state: STATE, questions: QUESTIONS, options: { device: "cpu" } },
+  // The fused fp16 export (~1.7 GB) does not fit ORT-web's wasm32 heap in
+  // Node; the split q8 export is a first-class shipped variant and does.
+  vega: { state: STATE, questions: QUESTIONS, options: { variant: "q8" } },
+  // The q8 export is ~1.8 GB — past ORT-web's wasm32 heap on a headless host,
+  // so the run loads it through the native runtime instead.
+  "strands-decider": { state: STATE, questions: QUESTIONS, setup: async () => ({ ort: await nativeOrt() }) },
 };
 
 // ---------------------------------------------------------------------------
@@ -64,7 +125,7 @@ const CASES = {
 // ---------------------------------------------------------------------------
 
 function parseArgs(argv) {
-  const out = { record: false, families: null, tolerance: 1e-4, file: BASELINE_FILE };
+  const out = { record: false, families: null, tolerance: 1e-4, file: BASELINE_FILE, runOne: null };
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     const eq = arg.startsWith("--") ? arg.indexOf("=") : -1;
@@ -87,6 +148,9 @@ function parseArgs(argv) {
         }
         break;
       case "--file": out.file = resolve(root, value()); break;
+      // Internal: run exactly one family in this process and report it as JSON.
+      // The parent loop spawns this so families never share a process.
+      case "--run-one": out.runOne = value(); break;
       case "--help": case "-h": out.help = true; break;
       default: throw new Error(`unknown option "${arg}" (try --help)`);
     }
@@ -100,7 +164,8 @@ function usage() {
     "",
     "Runs one real example per decision family and compares the answers to",
     "parity/baselines.json. Families without a baseline are skipped; pass",
-    "--record to store fresh baselines for the families that run.",
+    "--record to store fresh baselines for the families that run. Each family",
+    "runs in its own process (see the module comment).",
   ].join("\n");
 }
 
@@ -191,23 +256,42 @@ function pickResult(result) {
   }));
 }
 
+/** Resolve a case's stored example, its JSON options, and any non-JSON injections. */
+async function resolveCase(id) {
+  const decisionCase = CASES[id] ?? {};
+  const options = decisionCase.options ?? null;
+  const extra = decisionCase.setup ? await decisionCase.setup() : {};
+  return {
+    state: decisionCase.state ?? STATE,
+    questions: decisionCase.questions ?? QUESTIONS,
+    options,
+    runtimeOptions: { ...(options ?? {}), ...extra },
+  };
+}
+
 async function runFamily(id, { tolerance, record, baseline }) {
-  const decisionCase = CASES[id] ?? { state: STATE, questions: QUESTIONS };
-  const runtime = await createDecisionRuntime({ family: id, ...(decisionCase.options ?? {}) });
+  // No baseline to compare against and nothing to store: skip before the
+  // download. clef is the live example — its fp16 graph cannot load on a
+  // headless host at all, so the nightly reports SKIP instead of spending
+  // 1.4 GB to find that out.
+  if (!record && !baseline) return { status: "SKIPPED" };
+
+  const decisionCase = await resolveCase(id);
+  const runtime = await createDecisionRuntime({ family: id, ...decisionCase.runtimeOptions });
   try {
     const result = await runtime.decide(decisionCase.state, decisionCase.questions);
     const current = {
       family: id,
       recorded: new Date().toISOString(),
       info: JSON.parse(JSON.stringify(runtime.info ?? {})),
-      options: decisionCase.options ?? null,
+      options: decisionCase.options,
       state: decisionCase.state,
       questions: decisionCase.questions,
       result: pickResult(result),
     };
 
-    if (record || !baseline) {
-      return { status: record ? "RECORDED" : "SKIPPED", entry: current };
+    if (record) {
+      return { status: "RECORDED", entry: current };
     }
 
     // A stale baseline answers a different question — re-record, don't guess.
@@ -237,6 +321,49 @@ async function runFamily(id, { tolerance, record, baseline }) {
 // Main
 // ---------------------------------------------------------------------------
 
+// The child reports through this marker so the parent can tell a family run
+// from the (unbuffered, possibly noisy) library output, and tell "no result"
+// (a crash) apart from a clean FAIL.
+const RESULT_MARKER = "__PARITY_RESULT__";
+
+/** Run one family in a fresh process and return its outcome. */
+function runFamilyChild(id, args) {
+  const argv = [
+    fileURLToPath(import.meta.url), "--run-one", id,
+    "--file", args.file, "--tolerance", String(args.tolerance),
+  ];
+  if (args.record) argv.push("--record");
+  const child = spawnSync(process.execPath, argv, {
+    cwd: root,
+    encoding: "utf8",
+    env: process.env,
+    maxBuffer: 32 * 1024 * 1024,
+    // stdout carries the result marker; stderr passes through so native
+    // runtime warnings stay visible in the job log.
+    stdio: ["ignore", "pipe", "inherit"],
+  });
+
+  const stdout = child.stdout ?? "";
+  const lines = stdout.split(/\r?\n/);
+  const marker = lines.find((line) => line.startsWith(RESULT_MARKER));
+  const visible = lines.filter((line) => !line.startsWith(RESULT_MARKER)).join("\n").trim();
+  if (visible) console.log(visible);
+
+  if (!marker) {
+    const how = child.signal
+      ? `was killed by ${child.signal}`
+      : (typeof child.status === "number" && child.status < 0
+        ? `crashed natively (exit code ${child.status})`
+        : `exited with code ${child.status}`);
+    return {
+      status: "ERROR",
+      problems: [`the family's process ${how} before reporting a result`
+        + (child.error ? ` (${child.error.message})` : "")],
+    };
+  }
+  return JSON.parse(marker.slice(RESULT_MARKER.length));
+}
+
 async function main(argv) {
   const args = parseArgs(argv);
   if (args.help) {
@@ -245,6 +372,23 @@ async function main(argv) {
   }
 
   const known = listDecisionFamilies();
+  if (args.runOne) {
+    if (!known.includes(args.runOne)) throw new Error(`unknown family "${args.runOne}"`);
+    const baselineData = await readBaselines(args.file);
+    let outcome;
+    try {
+      outcome = await runFamily(args.runOne, {
+        tolerance: args.tolerance,
+        record: args.record,
+        baseline: baselineData.families[args.runOne],
+      });
+    } catch (error) {
+      outcome = { status: "ERROR", problems: [String(error?.stack ?? error)] };
+    }
+    console.log(`${RESULT_MARKER}${JSON.stringify(outcome)}`);
+    return 0;
+  }
+
   const selected = args.families ?? known;
   const unknown = selected.filter((id) => !known.includes(id));
   if (unknown.length) throw new Error(`unknown family/families: ${unknown.join(", ")} (known: ${known.join(", ")})`);
@@ -253,14 +397,8 @@ async function main(argv) {
   const outcomes = [];
 
   for (const id of selected) {
-    const baseline = baselineData.families[id];
     process.stdout.write(`[${id}] `);
-    let outcome;
-    try {
-      outcome = await runFamily(id, { tolerance: args.tolerance, record: args.record, baseline });
-    } catch (error) {
-      outcome = { status: "ERROR", problems: [String(error?.stack ?? error)] };
-    }
+    const outcome = runFamilyChild(id, args);
     outcomes.push({ id, outcome });
 
     switch (outcome.status) {
