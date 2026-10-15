@@ -39,7 +39,7 @@ deep-links one.
 
 The picker is part of the demo: every family answers through the same
 `decide()` contract, and the pass counter reports each family's real cost
-(split Vega reads the state once per question, the others batch).
+(split Vega reads the state once per question, and Laya's q8 web head runs once per question over a single shared encoder pass; the others batch).
 
 ![the demo's model picker answering with Bekko](docs/demo-model-picker.png)
 
@@ -58,7 +58,7 @@ could not answer the third question at all:
 ```js
 import { createDecider } from "jev-web";
 
-const decider = await createDecider();          // ~340 MB of weights, once
+const decider = await createDecider();          // ~340 MB of weights, once (default model; 29 MB - 0.61 GB across families)
 const { answers } = await decider.decide(
   "I was charged twice for the same order.",
   [{ type: "noul", instructions: "The customer is asking for a refund." }],
@@ -747,7 +747,7 @@ import { createDecider } from "jev-web";
   not explain or generate text.
 - Accuracy is domain-bound: questions and states unlike the model's training
   domain are out of distribution. Measure before relying on any answer.
-- English, 512-token sequence (state capped), one state per forward pass.
+- English; state text capped at 256 tokens by default (512-token max sequence), one state per forward pass.
 - **WebGPU support is uneven.** A `navigator.gpu` adapter existing is not
   evidence that inference will run: onnxruntime-web compiles WGSL per subgraph,
   and Firefox currently rejects the reference DeBERTa-v3 export's `Clip`
