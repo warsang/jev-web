@@ -3,6 +3,7 @@
 [![npm](https://img.shields.io/npm/v/jev-web.svg)](https://www.npmjs.com/package/jev-web)
 [![license](https://img.shields.io/npm/l/jev-web.svg)](./LICENSE)
 [![CI](https://github.com/warsang/jev-web/actions/workflows/test.yml/badge.svg)](https://github.com/warsang/jev-web/actions/workflows/test.yml)
+[![nightly parity](https://github.com/warsang/jev-web/actions/workflows/nightly.yml/badge.svg)](https://github.com/warsang/jev-web/actions/workflows/nightly.yml)
 
 Run **typed-decision models** in the browser. One *state* text
 plus any number of typed *questions* (`choice` / `score` / `noul`) go in; a
@@ -35,13 +36,13 @@ default, plus Bekko, Kev, Laya, Decision 2.0/3.0, Vega 0.8B (fused or the
 8-bit split export), clef and Strands Decider — and `?model=<family>`
 deep-links one.
 
-![jev-web demo: typed decisions vs raw text parsing](docs/demo.gif)
+![jev-web demo: typed decisions vs raw text parsing](https://raw.githubusercontent.com/warsang/jev-web/main/docs/demo.gif)
 
 The picker is part of the demo: every family answers through the same
 `decide()` contract, and the pass counter reports each family's real cost
 (split Vega reads the state once per question, and Laya's q8 web head runs once per question over a single shared encoder pass; the others batch).
 
-![the demo's model picker answering with Bekko](docs/demo-model-picker.png)
+![the demo's model picker answering with Bekko](https://raw.githubusercontent.com/warsang/jev-web/main/docs/demo-model-picker.png)
 
 <sub>The frames are captured from the live demo at
 [warsang.github.io/jev-web](https://warsang.github.io/jev-web/) — site → typed
@@ -51,7 +52,7 @@ disagree → the comparison matrix.</sub>
 Three questions, one forward pass, and a hard label from the rule parser that
 could not answer the third question at all:
 
-![three typed decisions with full distributions and a measured latency, beside a keyword baseline that returns hard labels and no answer](docs/demo-typed.png)
+![three typed decisions with full distributions and a measured latency, beside a keyword baseline that returns hard labels and no answer](https://raw.githubusercontent.com/warsang/jev-web/main/docs/demo-typed.png)
 
 ## Quickstart
 
@@ -71,9 +72,9 @@ answers[0].confidence;               // 0.92
 
 That is the whole integration. The first call downloads the weights and the
 browser caches them; every later call — and every later visit, including
-offline — is local. **Zero bundled dependencies**: `onnxruntime-web` is a peer
-the package manager installs, `@huggingface/transformers` is an optional peer
-imported lazily, and hosts can inject either one.
+offline — is local. **Zero bundled dependencies**: both runtimes are optional
+peers, imported lazily — `@huggingface/transformers` brings `onnxruntime-web`
+with it — and hosts can inject their own copy of either.
 
 ## What comes back
 
@@ -144,7 +145,7 @@ The negation case is the one worth looking at. The state is *"This is not about
 a refund. My card was stolen in Madrid and the bank refuses to help. I never
 received the money back I asked about."*
 
-![negation: the keyword baseline routes to refund and dispute, the model routes to card](docs/demo-negation.png)
+![negation: the keyword baseline routes to refund and dispute, the model routes to card](https://raw.githubusercontent.com/warsang/jev-web/main/docs/demo-negation.png)
 
 The rule parser finds the word `refund` and routes to **refund & dispute** — the
 exact opposite of what the customer meant. The model routes to **card** (53.3%)
@@ -153,7 +154,8 @@ the bad routing and the inversion come from the same clause, and neither is
 visible in a hard label.
 
 The demo also tracks outbound requests through the Performance API: you will see
-~14 requests while the weights load, then **0** for every decision after that.
+~14 requests while the weights load, then **0** for every decision after that —
+config and tokenizer files are cached too, so reloading the page adds no probes.
 
 ## Install
 
@@ -161,13 +163,14 @@ The demo also tracks outbound requests through the Performance API: you will see
 npm i jev-web @huggingface/transformers
 ```
 
-`@huggingface/transformers` is an optional peer (imported lazily); hosts that
-already ship their own copy can inject it via `createDecider({ transformers })`.
-`onnxruntime-web` is a regular peer, so `npm i jev-web` installs it; hosts with
-a custom runtime (local files, an older ORT, a worker) inject it via
-`createDecider({ ort })`. The peer range also accepts the `1.31.0-dev.*`
-builds `@huggingface/transformers` 4.3 pins — ORT 1.31 has no stable release
-yet, and the clef / Decision 3.0 fp16 graphs need that generation.
+Both runtimes are **optional peers**, imported lazily: `@huggingface/transformers`
+brings its own `onnxruntime-web`, and hosts that already ship either package
+inject it via `createDecider({ transformers })` / `createDecider({ ort })`.
+Install `onnxruntime-web` explicitly when your tooling does not pull transitive
+dependencies, or inject a custom runtime (local files, an older ORT, a worker).
+The peer range accepts the `1.31.0-dev.*` builds `@huggingface/transformers` 4.3
+pins — ORT 1.31 has no stable release yet, and the clef / Decision 3.0 fp16
+graphs need that generation.
 
 ## Use
 
@@ -207,15 +210,18 @@ const { answers } = await decider.decide(
 | `noul` | exactly 2 (defaults `["no","yes"]`) | `noul` (p of the second option = p(yes)), `confidence` |
 
 Every answer carries the full distribution. `decide()` also returns
-`{ truncated, length }` — the state is capped (256 tokens by default) and the
-flag tells you when it was cut.
+`{ truncated, length }` — one shared rule across all nine families (see
+[Truncation](#truncation-one-rule)), not a per-family guess.
 
 ## Backends and quantization
 
 `device` / `dtype` default to `auto`: WebGPU → `q4f16`, otherwise WASM → `q4`.
 Override explicitly (`fp16`, `fp32`, `q8`, …) when accuracy matters more than
 download size. First load downloads the weights once; transformers.js caches
-them (Cache API / IndexedDB) so later visits are offline-fast.
+them (Cache API / IndexedDB) so later visits are offline-fast. The families'
+config files, tokenizer files and ONNX external-data siblings all read through
+the same Cache API layer — a reload never re-probes them, so they do not show
+up in the host's request counter either.
 
 `decider.info` reports the resolved `{ model, revision, device, dtype,
 temperature, maxStateTokens, maxLen, pool, configSource }`.
@@ -238,7 +244,7 @@ take `input_ids, attention_mask, seg, pair_q, pair_opt`, and return per-pair
 
 `jev-web` is a multi-family runtime: `createDecisionRuntime({ family, fallback })`
 tries the requested family and then any fallbacks, returning the shared contract
-`{ info, decide(state, questions), dispose? }`:
+`{ info, decide(state, questions), dispose?() }`:
 
 ```js
 import { createDecisionRuntime, listDecisionFamilies } from "jev-web";
@@ -262,7 +268,29 @@ registerDecisionFamily("my-model", {
 ```
 
 `decide()` returns `prompts` (decoded input sequence(s), for audit/debug) and
-`timings` (per-stage ms) alongside the answers.
+`timings` (per-stage ms) alongside the answers. Calls are serialized per
+runtime — two overlapping `decide()` calls queue instead of corrupting the
+session — and `dispose()` releases the underlying sessions; it is async, so
+`await` it.
+
+## Truncation: one rule
+
+`truncated` is `true` iff a piece of **user text** — the state, a question's
+instructions, or an option — was shortened to fit the model. Padding, batching
+and delimiter bookkeeping never set it, and a family that trims nothing (e.g.
+Decision 3.0) always reports `false`.
+
+A family that cannot shorten safely does not drop text silently — it throws:
+`DecisionInputTooLongError` for open-jev (the laid-out sequence exceeds
+`maxLen`), and `RangeError` for Laya (a question has more options than
+`max_prefixes`), Strands (shortening the instructions would eat an option),
+Decision 2.0 (a prompt exceeds `maxLength`), Kev (a branch exceeds
+`max_branch_tokens`, or the branches leave no room for the state), the split
+Vega export (a state that does not fit `maxLen`), and Decision 3.0 (a prompt
+exceeds `maxLen`).
+
+So `truncated === true` means "the answer was produced with less text than I
+sent", and `false` means "the model saw everything" — never a silent maybe.
 
 ## Laya family (ModernBERT encoder + typed head)
 
@@ -725,9 +753,30 @@ import { createDecider } from "jev-web";
 - `createStrandsDecider(options)` → Strands Decider family: `{ info, decide, dispose }` (same `decide` contract)
 - `createBekkoDecider(options)`, `createDecision2Decider(options)`, `createKevDecider(options)`,
   `createVegaDecider(options)`, `createClefDecider(options)`, `createDecision3Decider(options)` → the same `decide` contract
+- registry: `registerDecisionFamily`, `createDecisionRuntime`, `listDecisionFamilies`,
+  `getDecisionFamily`.
+- fetch layer (what the families cache through): `fetchCachedBytes`,
+  `fetchCachedJson`, `fetchOnnxExternalData`, `requestPersistentStorage`,
+  `MODEL_CACHE`, and the `HttpError` / `JsonParseError` errors.
 - `normalizeQuestions`, `buildDecisionInput`, `typedMarkerIds`, `answersFromScores`,
   `softmaxWithTemperature`, `resolveDevice`, `resolveDtype`, `detectWebGPU`,
   `loadModelConfig`, defaults (model/revision/temperature/caps).
+
+TypeScript definitions for the whole surface ship in the package
+(`src/index.d.ts`); the resolution is `nodenext`-clean.
+
+## Verification
+
+- `npm test` — the offline unit suite (`node:test`, no network): protocol and
+  calibration maths per family, plus a warm-up → offline-reload cycle that
+  recreates every family from cache with **zero** requests.
+- `npm run typecheck` — compiles `types-test/consumer.ts` against
+  `src/index.d.ts` with `strict` + `nodenext` and checks that every runtime
+  export is declared.
+- `npm run parity` — runs one real example per family against its pinned
+  checkpoints and diffs the answers against `parity/baselines.json`. It runs
+  nightly (`.github/workflows/nightly.yml`); families without a baseline are
+  skipped, a drift exits non-zero.
 
 ## Demos
 
