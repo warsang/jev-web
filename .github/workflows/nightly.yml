@@ -22,7 +22,16 @@ jobs:
       # wasm32 heap on a headless host; parity loads them through the native
       # runtime instead. --no-save keeps the locked graph untouched (and the
       # alias out of package.json, so only this job pays for the native build).
+      # ONNXRUNTIME_NODE_INSTALL=skip: the postinstall would otherwise fetch
+      # the CUDA/TensorRT provider libs from the ORT-Nightly NuGet feed, but
+      # Microsoft.ML.OnnxRuntime.Gpu.Linux was never published for the 1.31
+      # dev builds (the last Linux GPU nightly nuget is 1.17, Jan 2024), so
+      # the install fails on every Linux runner. Parity runs CPU-only, and
+      # the core libonnxruntime + napi binding ship inside the npm tarball,
+      # so the provider download can be skipped entirely.
       - run: npm i --no-save --no-audit --no-fund onnxruntime-node-131@npm:onnxruntime-node@1.31.0-dev.20260914-8d85527a0
+        env:
+          ONNXRUNTIME_NODE_INSTALL: skip
       # One real example per family, real pinned weights, probabilities
       # compared to parity/baselines.json. Families without a baseline skip;
       # a drift exits 1.
