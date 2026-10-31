@@ -15,16 +15,21 @@
  *
  * A browser export too large for ORT-web's wasm32 heap on a headless host
  * (`strands-decider` today) is loaded through the native onnxruntime-node
- * instead — see `nativeOrt` below and the install step in the nightly
- * workflow. clef's fused fp16 graph loads only in a real browser (it rejects
- * at load on onnxruntime-node 1.30 and 1.31 alike, and does not fit the wasm32
- * heap), so that family has no baseline and skips until one can be recorded.
+ * instead — see `nativeOrt` below. That resolves to the same locked copy
+ * @huggingface/transformers already depends on, so a process never hosts two
+ * ORT generations (they mis-negotiate the native API version and crash — on
+ * Linux their libonnxruntime.so.1 copies also collide on the SONAME).
+ * clef's fused fp16 graph loads only in a real browser (it rejects at load
+ * on onnxruntime-node 1.30 and 1.31 alike, and does not fit the wasm32 heap),
+ * so that family has no baseline and skips until one can be recorded.
  *
- * Every family runs in its own child process. Two reasons: a family that
- * injects a native runtime must not share a process with the families that pull
- * in the runtime bundled by transformers (both ORT generations in one process
- * mis-negotiate the native API version and have crashed), and a native crash in
- * one family then fails that family instead of the whole run.
+ * Every family runs in its own child process so a native crash in one family
+ * fails that family instead of the whole run.
+ *
+ * Tolerance: the wasm families are deterministic across machines, but native
+ * CPU inference rounds differently per host, so the families that run through
+ * onnxruntime-node compare at 1e-2 instead of the 1e-4 default (per family in
+ * CASES below).
  *
  * What is compared: every answer field (including the full probability map),
  * the truncation flag, the fused length, and — when a family reports it — the
@@ -64,26 +69,29 @@ const QUESTIONS = [
 ];
 
 /**
- * Native onnxruntime-node 1.31 (installed by the nightly under the npm alias
- * "onnxruntime-node-131"; see .github/workflows/nightly.yml) adapted to the
- * call shape the families expect from onnxruntime-web:
+ * The native onnxruntime-node that @huggingface/transformers pins in the
+ * lockfile (1.30.0), adapted to the call shape the families expect from
+ * onnxruntime-web:
  *
  *   - InferenceSession.create maps their ["wasm"] provider request onto the
  *     native CPU provider;
  *   - Tensor accepts numeric arrays for int64 inputs (native ORT wants
  *     BigInt64Array).
+ *
+ * Resolving the same copy transformers uses keeps one ORT generation in the
+ * process (see the module comment).
  */
 async function nativeOrt() {
   let native;
   try {
-    native = await import("onnxruntime-node-131");
+    native = await import("onnxruntime-node");
   } catch {
     throw new Error(
-      "this family is exercised through the native runtime; install it with "
-      + "`npm i --no-save onnxruntime-node-131@npm:onnxruntime-node@1.31.0-dev.20260914-8d85527a0`");
+      "this family is exercised through the native runtime, which "
+      + "@huggingface/transformers pins as onnxruntime-node in the lockfile");
   }
-  if (!String(native.env?.versions?.node ?? "").startsWith("1.31")) {
-    throw new Error(`onnxruntime-node-131 resolved to ${native.env?.versions?.node}; 1.31 is required`);
+  if (!String(native.env?.versions?.node ?? "").startsWith("1.30")) {
+    throw new Error(`onnxruntime-node resolved to ${native.env?.versions?.node}; the locked 1.30 is required`);
   }
   class Tensor extends native.Tensor {
     constructor(type, data, dims) {
@@ -111,13 +119,19 @@ async function nativeOrt() {
 const CASES = {
   // transformers.js' Node build (onnxruntime-node) rejects "wasm", while the
   // browser default is wasm — the headless run asks for cpu explicitly.
-  "open-jev": { state: STATE, questions: QUESTIONS, options: { device: "cpu" } },
+  // Native CPU inference rounds differently per host, so this family compares
+  // at a looser tolerance than the deterministic wasm families.
+  "open-jev": { state: STATE, questions: QUESTIONS, options: { device: "cpu" }, tolerance: 1e-2 },
   // The fused fp16 export (~1.7 GB) does not fit ORT-web's wasm32 heap in
   // Node; the split q8 export is a first-class shipped variant and does.
   vega: { state: STATE, questions: QUESTIONS, options: { variant: "q8" } },
-  // The q8 export is ~1.8 GB — past ORT-web's wasm32 heap on a headless host,
-  // so the run loads it through the native runtime instead.
-  "strands-decider": { state: STATE, questions: QUESTIONS, setup: async () => ({ ort: await nativeOrt() }) },
+  // The q8 export is ~1.8 GB — past ORT-web's wasm32 heap on a headless
+  // host, so the run loads it through the native runtime instead (same
+  // host-dependent rounding story as open-jev).
+  "strands-decider": {
+    state: STATE, questions: QUESTIONS, tolerance: 1e-2,
+    setup: async () => ({ ort: await nativeOrt() }),
+  },
 };
 
 // ---------------------------------------------------------------------------
@@ -398,12 +412,13 @@ async function main(argv) {
 
   for (const id of selected) {
     process.stdout.write(`[${id}] `);
-    const outcome = runFamilyChild(id, args);
+    const tolerance = CASES[id]?.tolerance ?? args.tolerance;
+    const outcome = runFamilyChild(id, { ...args, tolerance });
     outcomes.push({ id, outcome });
 
     switch (outcome.status) {
       case "PASS":
-        console.log(`PASS (tolerance ${args.tolerance})`);
+        console.log(`PASS (tolerance ${tolerance})`);
         break;
       case "RECORDED":
         console.log("RECORDED");

@@ -782,8 +782,12 @@ TypeScript definitions for the whole surface ship in the package
   wasm32 heap on a headless host), so that family reports SKIP for now. Two
   other headless accommodations are worth knowing: `vega` is recorded from its
   split q8 export — the fused fp16 export is 1.7 GB and likewise does not fit
-  the wasm32 heap — and `strands-decider` (1.8 GB) runs through native
-  onnxruntime-node, installed by the workflow under an npm alias.
+  the wasm32 heap — and `strands-decider` (1.8 GB) runs through the native
+  onnxruntime-node pinned in the lockfile (the same copy transformers
+  resolves; the wasm32 heap cannot hold the graph). Native CPU inference also
+  rounds differently per host, so the two native families (`open-jev` and
+  `strands-decider`) compare at a 1e-2 tolerance while the deterministic wasm
+  families stay at 1e-4.
 
 ## Demos
 
